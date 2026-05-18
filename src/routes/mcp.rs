@@ -106,8 +106,12 @@ async fn tools_call(
             })?))
         }
         "run_subagent" => {
-            let typed: RunSubagentRequest = serde_json::from_value(req.arguments)
+            let mut typed: RunSubagentRequest = serde_json::from_value(req.arguments)
                 .map_err(|e| GatewayError::Invalid(format!("run_subagent args: {e}")))?;
+            // Source of truth for tenant_id is the authenticated bearer.
+            // Anything the caller put in the body is silently overridden — a
+            // tenant cannot spoof another tenant's id, ever.
+            typed.tenant_id = Some(auth.tenant.id);
             let resp = state.tools.run_subagent(typed).await?;
             Ok(Json(serde_json::to_value(resp).map_err(|e| {
                 GatewayError::Internal(format!("serialize: {e}"))

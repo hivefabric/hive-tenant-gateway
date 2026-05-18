@@ -1,6 +1,6 @@
 //! End-to-end HTTP-level tests with a stubbed `McpTools`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
@@ -17,7 +17,12 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-struct StubTools;
+/// Records the `tenant_id` the gateway forwarded on each `run_subagent` call.
+/// Lets us assert that the bearer's tenant id is what reaches Honeycomb.
+#[derive(Default)]
+struct StubTools {
+    last_tenant_id: Mutex<Option<Uuid>>,
+}
 
 #[async_trait]
 impl McpTools for StubTools {
@@ -30,6 +35,7 @@ impl McpTools for StubTools {
         &self,
         req: RunSubagentRequest,
     ) -> Result<RunSubagentResponse, McpGatewayError> {
+        *self.last_tenant_id.lock().unwrap() = req.tenant_id;
         Ok(RunSubagentResponse {
             task_id: Uuid::nil(),
             status: "completed".into(),
@@ -45,7 +51,7 @@ impl McpTools for StubTools {
     }
 }
 
-async fn build_app() -> (axum::Router, String, Uuid) {
+async fn build_app() -> (axum::Router, String, Uuid, Arc<StubTools>) {
     let tenants: Arc<dyn TenantStore> = Arc::new(InMemoryTenantStore::new());
     let t = tenants
         .create_tenant("acme".into(), None, None)
@@ -55,9 +61,10 @@ async fn build_app() -> (axum::Router, String, Uuid) {
         .mint_api_key(t.id, vec![ApiKeyScope::ToolsInvoke])
         .await
         .unwrap();
-    let tools: Arc<dyn McpTools + Send + Sync + 'static> = Arc::new(StubTools);
+    let stub = Arc::new(StubTools::default());
+    let tools: Arc<dyn McpTools + Send + Sync + 'static> = stub.clone();
     let state = AppState::new(tenants, tools);
-    (router(state), mint.plaintext, t.id)
+    (router(state), mint.plaintext, t.id, stub)
 }
 
 async fn body_json(resp: axum::response::Response) -> Value {
@@ -67,7 +74,7 @@ async fn body_json(resp: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn healthz_is_public() {
-    let (app, _key, _id) = build_app().await;
+    let (app, _key, _id, _stub) = build_app().await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -84,7 +91,7 @@ async fn healthz_is_public() {
 
 #[tokio::test]
 async fn whoami_returns_tenant_for_valid_bearer() {
-    let (app, key, tenant_id) = build_app().await;
+    let (app, key, tenant_id, _stub) = build_app().await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -103,7 +110,7 @@ async fn whoami_returns_tenant_for_valid_bearer() {
 
 #[tokio::test]
 async fn whoami_rejects_missing_authorization() {
-    let (app, _key, _id) = build_app().await;
+    let (app, _key, _id, _stub) = build_app().await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -118,7 +125,7 @@ async fn whoami_rejects_missing_authorization() {
 
 #[tokio::test]
 async fn whoami_rejects_bad_bearer() {
-    let (app, _key, _id) = build_app().await;
+    let (app, _key, _id, _stub) = build_app().await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -134,7 +141,7 @@ async fn whoami_rejects_bad_bearer() {
 
 #[tokio::test]
 async fn tools_call_run_subagent_round_trips_through_stub() {
-    let (app, key, _id) = build_app().await;
+    let (app, key, _id, _stub) = build_app().await;
     let body = json!({
         "name": "run_subagent",
         "arguments": {
@@ -165,7 +172,7 @@ async fn tools_call_run_subagent_round_trips_through_stub() {
 
 #[tokio::test]
 async fn tools_call_unknown_tool_returns_400() {
-    let (app, key, _id) = build_app().await;
+    let (app, key, _id, _stub) = build_app().await;
     let body = json!({"name": "definitely_not_a_tool", "arguments": {}});
     let resp = app
         .oneshot(
@@ -190,7 +197,7 @@ async fn tools_call_missing_scope_returns_403() {
         .await
         .unwrap();
     let mint = tenants.mint_api_key(t.id, vec![]).await.unwrap();
-    let tools: Arc<dyn McpTools + Send + Sync + 'static> = Arc::new(StubTools);
+    let tools: Arc<dyn McpTools + Send + Sync + 'static> = Arc::new(StubTools::default());
     let state = AppState::new(tenants, tools);
     let app = router(state);
     let body = json!({"name": "describe_cluster", "arguments": {}});
@@ -212,7 +219,7 @@ async fn tools_call_missing_scope_returns_403() {
 #[tokio::test]
 async fn admin_create_tenant_and_use_returned_key() {
     let tenants: Arc<dyn TenantStore> = Arc::new(InMemoryTenantStore::new());
-    let tools: Arc<dyn McpTools + Send + Sync + 'static> = Arc::new(StubTools);
+    let tools: Arc<dyn McpTools + Send + Sync + 'static> = Arc::new(StubTools::default());
     let state = AppState::new(tenants, tools);
     let app = router(state);
 
@@ -259,7 +266,7 @@ async fn revoking_a_key_invalidates_subsequent_calls() {
         .mint_api_key(t.id, vec![ApiKeyScope::ToolsInvoke])
         .await
         .unwrap();
-    let tools: Arc<dyn McpTools + Send + Sync + 'static> = Arc::new(StubTools);
+    let tools: Arc<dyn McpTools + Send + Sync + 'static> = Arc::new(StubTools::default());
     let state = AppState::new(tenants, tools);
     let app = router(state);
 
@@ -287,4 +294,61 @@ async fn revoking_a_key_invalidates_subsequent_calls() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn run_subagent_propagates_authenticated_tenant_id() {
+    let (app, key, tenant_id, stub) = build_app().await;
+    let body = json!({
+        "name": "run_subagent",
+        "arguments": {
+            "prompt": "x",
+            "model_id": "qwen2.5:0.5b"
+        }
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mcp/tools/call")
+                .header("authorization", format!("Bearer {key}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(*stub.last_tenant_id.lock().unwrap(), Some(tenant_id));
+}
+
+#[tokio::test]
+async fn run_subagent_overrides_caller_provided_tenant_id() {
+    // Customer tries to spoof a different tenant_id in the request body.
+    // The gateway must override it with the bearer's authenticated tenant.
+    let (app, key, tenant_id, stub) = build_app().await;
+    let spoof = Uuid::new_v4();
+    assert_ne!(spoof, tenant_id);
+    let body = json!({
+        "name": "run_subagent",
+        "arguments": {
+            "prompt": "x",
+            "model_id": "qwen2.5:0.5b",
+            "tenant_id": spoof
+        }
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mcp/tools/call")
+                .header("authorization", format!("Bearer {key}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(*stub.last_tenant_id.lock().unwrap(), Some(tenant_id));
 }
