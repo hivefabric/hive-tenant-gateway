@@ -11,7 +11,7 @@ Phase 2.2 — Postgres persistence + admin auth gate.
 - Bearer-token auth, per-tenant API keys (Argon2-hashed at rest, never plaintext).
 - Per-tenant scopes (`tools:invoke`, `orchestrate`, `read:usage`).
 - **Tenant runs the loop:** `POST /v1/mcp/tools/list`, `POST /v1/mcp/tools/call`.
-- **Gateway runs the loop:** `POST /v1/orchestrate` with the `FrontierLlm` adapter trait. Anthropic Messages API adapter ships today; OpenAI / Gemini / Bedrock / OpenAI-compatible adapters land additively.
+- **Gateway runs the loop:** `POST /v1/orchestrate` with the `FrontierLlm` adapter trait. Adapters today: Anthropic (Messages API) + OpenAI (Chat Completions, also covers any OpenAI-compatible provider — Together, Groq, vLLM, Ollama — via `base_url` override). Gemini / Bedrock land additively.
 - **Admin auth gate:** `/admin/v1/*` requires `x-admin-key: $HF_ADMIN_KEY`, constant-time compared. If `HF_ADMIN_KEY` is unset, the admin surface is disabled (every endpoint returns 503).
 - **Postgres-backed `TenantStore`** behind the same trait as the in-memory dev store. Selection is runtime: `DATABASE_URL` set → Postgres + migrations; unset → in-memory + dev seed tenant.
 - `tenant_id` propagated through `TaskCreateRequest` and stamped on every Honeycomb `TaskRecord`. Spoof-prevention: gateway always overrides caller-supplied `tenant_id` with the bearer's tenant.
@@ -20,7 +20,7 @@ Not yet:
 - Per-tenant LLM provider registry (today: customer sends key in each `/v1/orchestrate` body).
 - KMS for tenant-side LLM API keys.
 - Honey Ledger budget reservation/refund cycle.
-- OpenAI / Gemini / Bedrock adapters.
+- Gemini / Bedrock adapters.
 - Bearer-token public/secret split for O(1) resolve (today: O(N) argon2 verify per resolve — viable for the first hundred tenants, tracked as Phase 2.3 perf).
 
 See [`docs/02_architecture/18_tenant_gateway.md`](https://github.com/hivefabric/.github-private/blob/main/docs/private/docs/02_architecture/18_tenant_gateway.md) in the private docs.
@@ -127,6 +127,8 @@ Tool calls become POSTs to `/v1/mcp/tools/call`; tool results are fed back to th
 
 For customers who don't want to maintain an agent loop in their own code: send a chat completion + LLM provider config in one request. We run the tool loop internally and return the final assistant message + a trace.
 
+**Anthropic (Claude):**
+
 ```bash
 curl -s -X POST \
   -H "Authorization: Bearer $KEY" \
@@ -143,6 +145,37 @@ curl -s -X POST \
     "max_iterations": 10
   }' \
   http://localhost:8090/v1/orchestrate | jq .
+```
+
+**OpenAI (GPT):**
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $KEY" \
+  -H "content-type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "Classify the sentiment of: '\''great game!'\''"}
+    ],
+    "llm": {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "api_key": "sk-..."
+    },
+    "max_iterations": 10
+  }' \
+  http://localhost:8090/v1/orchestrate | jq .
+```
+
+**OpenAI-compatible** (Together, Groq, vLLM, Ollama, etc.) — same `provider: "openai"`, point `base_url` elsewhere:
+
+```bash
+"llm": {
+  "provider": "openai",
+  "model": "llama3.1:70b",
+  "api_key": "...",
+  "base_url": "https://api.together.xyz"
+}
 ```
 
 Returns:

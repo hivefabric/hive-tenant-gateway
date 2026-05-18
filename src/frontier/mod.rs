@@ -16,6 +16,7 @@
 //! customers can store provider configs once and reference them by id.
 
 pub mod anthropic;
+pub mod openai;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -46,8 +47,10 @@ impl From<FrontierLlmError> for GatewayError {
 
 /// Per-request LLM provider config sent in the `POST /v1/orchestrate` body.
 ///
-/// Phase 2.1 ships only the Anthropic provider; the enum is open so the
-/// remaining providers can land additively without a wire-format break.
+/// Anthropic and OpenAI ship today. The OpenAI variant doubles as the
+/// "OpenAI-compatible" path: any provider conforming to the Chat Completions
+/// spec (Together, Groq, vLLM, Ollama's `/v1/chat/completions`, etc.) works
+/// by setting `base_url` to that endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "provider", rename_all = "snake_case")]
 pub enum LlmProviderConfig {
@@ -57,10 +60,17 @@ pub enum LlmProviderConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_url: Option<String>,
     },
-    // Phase 2.2: Openai { model, api_key, base_url? },
-    // Phase 2.2: Gemini { model, api_key },
-    // Phase 2.2: Bedrock { model, region, ... },
-    // Phase 2.2: OpenaiCompatible { model, base_url, api_key? },
+    Openai {
+        model: String,
+        api_key: String,
+        /// Override the default `https://api.openai.com` base URL. Use this
+        /// to route to OpenAI-compatible providers (Together, Groq, vLLM,
+        /// Ollama, etc.).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+    },
+    // Phase 2.4: Gemini { model, api_key },
+    // Phase 2.4: Bedrock { model, region, ... },
 }
 
 /// A single tool the LLM can call. Mirrors Anthropic's tool definition shape;
@@ -163,6 +173,15 @@ impl FrontierLlmFactory for DefaultFrontierLlmFactory {
                 api_key,
                 base_url,
             } => Ok(Box::new(anthropic::AnthropicAdapter::new(
+                model.clone(),
+                api_key.clone(),
+                base_url.clone(),
+            ))),
+            LlmProviderConfig::Openai {
+                model,
+                api_key,
+                base_url,
+            } => Ok(Box::new(openai::OpenaiAdapter::new(
                 model.clone(),
                 api_key.clone(),
                 base_url.clone(),

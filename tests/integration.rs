@@ -769,3 +769,71 @@ async fn admin_endpoint_rejects_wrong_admin_key() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn orchestrate_works_with_openai_provider_config() {
+    // Provider field is "openai" instead of "anthropic". The route handler
+    // passes the config to the factory; tests inject a scripted frontier that
+    // ignores provider — what we're checking is that an `openai` config
+    // deserialises and reaches the loop intact.
+    let script = vec![ChatResponse::Final {
+        text: "Sure thing.".into(),
+    }];
+    let (app, key, _id, _stub) = build_app_with_script(script).await;
+
+    let body = json!({
+        "messages": [{"role": "user", "content": "say hi"}],
+        "llm": {
+            "provider": "openai",
+            "model": "gpt-4o",
+            "api_key": "sk-test"
+        },
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/orchestrate")
+                .header("authorization", format!("Bearer {key}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["final_message"], "Sure thing.");
+}
+
+#[tokio::test]
+async fn orchestrate_accepts_openai_compatible_base_url() {
+    // base_url override → routes to an OpenAI-compatible endpoint
+    // (Together, Groq, vLLM, Ollama). Same scripted frontier; we're just
+    // exercising deserialisation + factory dispatch.
+    let script = vec![ChatResponse::Final { text: "ok".into() }];
+    let (app, key, _id, _stub) = build_app_with_script(script).await;
+
+    let body = json!({
+        "messages": [{"role": "user", "content": "x"}],
+        "llm": {
+            "provider": "openai",
+            "model": "llama3.1:70b",
+            "api_key": "sk-anything",
+            "base_url": "https://api.together.xyz"
+        },
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/orchestrate")
+                .header("authorization", format!("Bearer {key}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
