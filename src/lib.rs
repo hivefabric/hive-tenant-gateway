@@ -37,6 +37,9 @@ pub struct AppState {
     pub tenants: Arc<dyn TenantStore>,
     pub tools: DynMcpTools,
     pub frontier_factory: Arc<dyn FrontierLlmFactory>,
+    /// Plaintext admin key required on `/admin/v1/*`. `None` disables the
+    /// admin surface entirely (every admin route returns 503).
+    pub admin_key: Option<String>,
 }
 
 impl AppState {
@@ -49,7 +52,14 @@ impl AppState {
             tenants,
             tools,
             frontier_factory,
+            admin_key: None,
         }
+    }
+
+    /// Enable the admin surface by setting the expected `x-admin-key` value.
+    pub fn with_admin_key(mut self, admin_key: String) -> Self {
+        self.admin_key = Some(admin_key);
+        self
     }
 }
 

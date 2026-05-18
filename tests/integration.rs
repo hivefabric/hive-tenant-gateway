@@ -322,7 +322,7 @@ async fn admin_create_tenant_and_use_returned_key() {
     let tenants: Arc<dyn TenantStore> = Arc::new(InMemoryTenantStore::new());
     let tools: Arc<dyn McpTools + Send + Sync + 'static> = Arc::new(StubTools::default());
     let frontier: Arc<dyn FrontierLlmFactory> = Arc::new(FailFactory);
-    let state = AppState::new(tenants, tools, frontier);
+    let state = AppState::new(tenants, tools, frontier).with_admin_key("admin-secret".into());
     let app = router(state);
 
     let create_body = json!({"name": "newco"});
@@ -333,6 +333,7 @@ async fn admin_create_tenant_and_use_returned_key() {
                 .method("POST")
                 .uri("/admin/v1/tenants")
                 .header("content-type", "application/json")
+                .header("x-admin-key", "admin-secret")
                 .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
                 .unwrap(),
         )
@@ -370,7 +371,7 @@ async fn revoking_a_key_invalidates_subsequent_calls() {
         .unwrap();
     let tools: Arc<dyn McpTools + Send + Sync + 'static> = Arc::new(StubTools::default());
     let frontier: Arc<dyn FrontierLlmFactory> = Arc::new(FailFactory);
-    let state = AppState::new(tenants, tools, frontier);
+    let state = AppState::new(tenants, tools, frontier).with_admin_key("admin-secret".into());
     let app = router(state);
 
     let resp = app
@@ -379,6 +380,7 @@ async fn revoking_a_key_invalidates_subsequent_calls() {
             Request::builder()
                 .method("DELETE")
                 .uri(format!("/admin/v1/api-keys/{}", mint.api_key.id))
+                .header("x-admin-key", "admin-secret")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -692,4 +694,78 @@ async fn orchestrate_feeds_tool_error_back_to_llm_and_keeps_looping() {
     let tools = trace[0]["tools"].as_array().unwrap();
     assert_eq!(tools[0]["name"], "totally_made_up");
     assert!(tools[0]["error"].is_string());
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Admin auth gate (HF_ADMIN_KEY / x-admin-key)
+// ────────────────────────────────────────────────────────────────────────────
+
+fn admin_app_with_key(key: &str) -> axum::Router {
+    let tenants: Arc<dyn TenantStore> = Arc::new(InMemoryTenantStore::new());
+    let tools: Arc<dyn McpTools + Send + Sync + 'static> = Arc::new(StubTools::default());
+    let frontier: Arc<dyn FrontierLlmFactory> = Arc::new(FailFactory);
+    let state = AppState::new(tenants, tools, frontier).with_admin_key(key.to_string());
+    router(state)
+}
+
+fn admin_app_without_key() -> axum::Router {
+    let tenants: Arc<dyn TenantStore> = Arc::new(InMemoryTenantStore::new());
+    let tools: Arc<dyn McpTools + Send + Sync + 'static> = Arc::new(StubTools::default());
+    let frontier: Arc<dyn FrontierLlmFactory> = Arc::new(FailFactory);
+    let state = AppState::new(tenants, tools, frontier);
+    router(state)
+}
+
+#[tokio::test]
+async fn admin_endpoint_returns_503_when_admin_key_unset() {
+    // No admin_key on AppState => admin surface disabled.
+    let app = admin_app_without_key();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/v1/tenants")
+                .header("content-type", "application/json")
+                .header("x-admin-key", "anything-goes")
+                .body(Body::from(serde_json::to_vec(&json!({"name":"x"})).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn admin_endpoint_rejects_missing_header_when_admin_key_set() {
+    let app = admin_app_with_key("admin-secret");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/v1/tenants")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&json!({"name":"x"})).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn admin_endpoint_rejects_wrong_admin_key() {
+    let app = admin_app_with_key("admin-secret");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/v1/tenants")
+                .header("content-type", "application/json")
+                .header("x-admin-key", "guess-no")
+                .body(Body::from(serde_json::to_vec(&json!({"name":"x"})).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

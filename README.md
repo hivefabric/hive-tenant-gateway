@@ -6,38 +6,68 @@ The customer owns the orchestrator loop. We own the network and the SLM substrat
 
 ## Status
 
-Phase 2.1 — orchestration endpoint live.
+Phase 2.2 — Postgres persistence + admin auth gate.
 
 - Bearer-token auth, per-tenant API keys (Argon2-hashed at rest, never plaintext).
 - Per-tenant scopes (`tools:invoke`, `orchestrate`, `read:usage`).
 - **Tenant runs the loop:** `POST /v1/mcp/tools/list`, `POST /v1/mcp/tools/call`.
-- **Gateway runs the loop:** `POST /v1/orchestrate` — customer sends `{messages, llm}`; we drive the multi-turn tool loop using their LLM via the `FrontierLlm` adapter trait. Anthropic Messages API adapter ships today; OpenAI / Gemini / Bedrock / OpenAI-compatible adapters land additively.
-- Admin provisioning: `POST /admin/v1/tenants`, `POST /admin/v1/tenants/:id/api-keys`, `DELETE /admin/v1/api-keys/:id`.
+- **Gateway runs the loop:** `POST /v1/orchestrate` with the `FrontierLlm` adapter trait. Anthropic Messages API adapter ships today; OpenAI / Gemini / Bedrock / OpenAI-compatible adapters land additively.
+- **Admin auth gate:** `/admin/v1/*` requires `x-admin-key: $HF_ADMIN_KEY`, constant-time compared. If `HF_ADMIN_KEY` is unset, the admin surface is disabled (every endpoint returns 503).
+- **Postgres-backed `TenantStore`** behind the same trait as the in-memory dev store. Selection is runtime: `DATABASE_URL` set → Postgres + migrations; unset → in-memory + dev seed tenant.
 - `tenant_id` propagated through `TaskCreateRequest` and stamped on every Honeycomb `TaskRecord`. Spoof-prevention: gateway always overrides caller-supplied `tenant_id` with the bearer's tenant.
-- In-memory tenant store. Postgres swap is Phase 2.2.
 
 Not yet:
-- Postgres-backed tenant store + admin auth gate (today: open; **do not deploy without one**).
 - Per-tenant LLM provider registry (today: customer sends key in each `/v1/orchestrate` body).
 - KMS for tenant-side LLM API keys.
 - Honey Ledger budget reservation/refund cycle.
 - OpenAI / Gemini / Bedrock adapters.
+- Bearer-token public/secret split for O(1) resolve (today: O(N) argon2 verify per resolve — viable for the first hundred tenants, tracked as Phase 2.3 perf).
 
 See [`docs/02_architecture/18_tenant_gateway.md`](https://github.com/hivefabric/.github-private/blob/main/docs/private/docs/02_architecture/18_tenant_gateway.md) in the private docs.
 
 ## Run locally
+
+### Dev mode (in-memory store)
 
 ```bash
 # 1. Start Honeycomb + a Comb node (the SLM side):
 cd ../honeycomb/docker
 docker compose -f docker-compose.with-node.yml up -d
 
-# 2. Start the tenant gateway:
+# 2. Start the tenant gateway in dev mode (in-memory + seed tenant):
 cd ../../hive-tenant-gateway
 HONEYCOMB_URL=http://localhost:8080 \
 HONEYCOMB_API_KEY=dev-hive-key \
 GATEWAY_BIND=0.0.0.0:8090 \
 cargo run --bin tenant-gateway
+```
+
+The dev binary prints a seed tenant API key on stderr at boot. Admin endpoints
+return 503 unless you also set `HF_ADMIN_KEY`.
+
+### Production mode (Postgres + admin gate)
+
+```bash
+docker run -d --name hf-pg \
+  -e POSTGRES_PASSWORD=dev -e POSTGRES_USER=hf -e POSTGRES_DB=hf \
+  -p 5432:5432 postgres:16
+
+DATABASE_URL=postgres://hf:dev@localhost:5432/hf \
+HF_ADMIN_KEY=$(openssl rand -base64 32) \
+HONEYCOMB_URL=http://localhost:8080 \
+HONEYCOMB_API_KEY=dev-hive-key \
+GATEWAY_BIND=0.0.0.0:8090 \
+cargo run --bin tenant-gateway
+```
+
+Migrations run automatically. Provision a tenant:
+
+```bash
+curl -s -X POST \
+  -H "x-admin-key: $HF_ADMIN_KEY" \
+  -H "content-type: application/json" \
+  -d '{"name":"acme"}' \
+  http://localhost:8090/admin/v1/tenants | jq .
 ```
 
 The dev binary prints a seed tenant API key on stderr at boot:

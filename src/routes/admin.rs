@@ -1,8 +1,10 @@
 //! Admin surface — provision tenants, mint API keys, revoke keys.
 //!
-//! Phase 2.0 ships these endpoints unauthenticated for dev. Production must
-//! sit behind an admin-only auth gate (mTLS or a separate admin API key
-//! issued out of band).
+//! All `/admin/v1/*` endpoints require the [`crate::auth::AdminAuth`]
+//! extractor: the request must carry `x-admin-key: <HF_ADMIN_KEY>` and that
+//! value must equal the plaintext key the operator configured at boot via
+//! the `HF_ADMIN_KEY` env var. Without that env var set, the admin surface
+//! is disabled and every endpoint returns 503.
 
 use axum::{
     extract::{Path, State},
@@ -12,6 +14,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::auth::AdminAuth;
 use crate::budget::BudgetDefaults;
 use crate::error::GatewayResult;
 use crate::tenant::{ApiKeyMint, ApiKeyScope, Tenant};
@@ -38,6 +41,7 @@ struct CreateTenantResponse {
 }
 
 async fn create_tenant(
+    _admin: AdminAuth,
     State(state): State<AppState>,
     Json(req): Json<CreateTenantRequest>,
 ) -> GatewayResult<Json<CreateTenantResponse>> {
@@ -66,6 +70,7 @@ fn default_scopes() -> Vec<ApiKeyScope> {
 }
 
 async fn mint_api_key(
+    _admin: AdminAuth,
     State(state): State<AppState>,
     Path(tenant_id): Path<Uuid>,
     Json(req): Json<MintApiKeyRequest>,
@@ -75,6 +80,7 @@ async fn mint_api_key(
 }
 
 async fn revoke_api_key(
+    _admin: AdminAuth,
     State(state): State<AppState>,
     Path(key_id): Path<Uuid>,
 ) -> GatewayResult<Json<serde_json::Value>> {

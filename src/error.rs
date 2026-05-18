@@ -14,6 +14,8 @@ pub enum GatewayError {
     InvalidApiKey,
     #[error("API key revoked")]
     KeyRevoked,
+    #[error("admin surface disabled — set HF_ADMIN_KEY to enable")]
+    AdminDisabled,
     #[error("missing required scope: {0}")]
     MissingScope(&'static str),
     #[error("tenant not found")]
@@ -36,6 +38,7 @@ impl IntoResponse for GatewayError {
             GatewayError::Unauthorized | GatewayError::InvalidApiKey | GatewayError::KeyRevoked => {
                 (StatusCode::UNAUTHORIZED, "unauthorized")
             }
+            GatewayError::AdminDisabled => (StatusCode::SERVICE_UNAVAILABLE, "admin_disabled"),
             GatewayError::MissingScope(_) => (StatusCode::FORBIDDEN, "forbidden"),
             GatewayError::TenantNotFound => (StatusCode::NOT_FOUND, "not_found"),
             GatewayError::BudgetExceeded => (StatusCode::PAYMENT_REQUIRED, "budget_exceeded"),

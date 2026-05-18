@@ -1,24 +1,27 @@
 //! `tenant-gateway` — multi-tenant BYO-LLM HTTP entry point.
 //!
-//! Dev-mode bootstrap: spins up an in-memory tenant store and creates a
-//! single seed tenant + API key on startup so the operator can curl the
-//! service without provisioning a Postgres.
-//!
 //! Configure via env:
 //!   GATEWAY_BIND        bind address (default 0.0.0.0:8090)
 //!   HONEYCOMB_URL       upstream Honeycomb base URL (default http://localhost:8080)
 //!   HONEYCOMB_API_KEY   optional Honeycomb x-api-key
-//!   SEED_TENANT_NAME    name of the dev seed tenant (default "dev")
-//!
-//! On boot the gateway prints the seed tenant's plaintext API key to stderr.
-//! Use that as `Authorization: Bearer <plaintext>` for `/v1/*` calls.
+//!   DATABASE_URL        Postgres URL. When set, a Postgres-backed
+//!                       TenantStore is used and migrations are run at boot.
+//!                       When unset, an in-memory TenantStore is used and a
+//!                       dev seed tenant is created (useful for local dev).
+//!   HF_ADMIN_KEY        plaintext admin key required on every `/admin/v1/*`
+//!                       request as `x-admin-key`. When unset, the admin
+//!                       surface is disabled (every admin endpoint returns
+//!                       503 — operators must opt in explicitly).
+//!   SEED_TENANT_NAME    name of the dev seed tenant (default "dev"), only
+//!                       used when DATABASE_URL is unset.
 
 use std::sync::Arc;
 
 use hive_mcp_gateway::{tools::HttpMcpTools, HoneycombClient};
 use hive_tenant_gateway::{
-    router, tenant::ApiKeyScope, AppState, DefaultFrontierLlmFactory, FrontierLlmFactory,
-    InMemoryTenantStore, TenantStore,
+    router,
+    tenant::{ApiKeyScope, InMemoryTenantStore, TenantStore},
+    AppState, DefaultFrontierLlmFactory, FrontierLlmFactory,
 };
 use tokio::net::TcpListener;
 
@@ -35,38 +38,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let honeycomb_url =
         std::env::var("HONEYCOMB_URL").unwrap_or_else(|_| "http://localhost:8080".into());
     let honeycomb_api_key = std::env::var("HONEYCOMB_API_KEY").ok();
+    let admin_key = std::env::var("HF_ADMIN_KEY").ok();
+    let database_url = std::env::var("DATABASE_URL").ok();
     let seed_name = std::env::var("SEED_TENANT_NAME").unwrap_or_else(|_| "dev".into());
 
     tracing::info!(%bind, %honeycomb_url, "tenant-gateway starting");
+    if admin_key.is_none() {
+        tracing::warn!(
+            "HF_ADMIN_KEY is unset — admin surface (/admin/v1/*) will return 503. \
+             Set it to enable tenant provisioning."
+        );
+    }
 
     let tools = Arc::new(HttpMcpTools::new(HoneycombClient::new(
         honeycomb_url,
         honeycomb_api_key,
     )));
-    let tenants: Arc<dyn TenantStore> = Arc::new(InMemoryTenantStore::new());
     let frontier_factory: Arc<dyn FrontierLlmFactory> = Arc::new(DefaultFrontierLlmFactory);
 
-    let tenant = tenants.create_tenant(seed_name, None, None).await?;
-    let mint = tenants
-        .mint_api_key(
-            tenant.id,
-            vec![ApiKeyScope::ToolsInvoke, ApiKeyScope::Orchestrate],
-        )
-        .await?;
-    eprintln!();
-    eprintln!("[tenant-gateway] dev seed tenant ready");
-    eprintln!("[tenant-gateway]   tenant_id   = {}", tenant.id);
-    eprintln!("[tenant-gateway]   tenant_name = {}", tenant.name);
-    eprintln!("[tenant-gateway]   plan        = {}", tenant.plan);
-    eprintln!("[tenant-gateway]   API KEY (shown once) = {}", mint.plaintext);
-    eprintln!();
-    eprintln!(
-        "Try: curl -H 'Authorization: Bearer {}' http://{}/v1/whoami",
-        mint.plaintext, bind
-    );
-    eprintln!();
+    let tenants: Arc<dyn TenantStore> = match database_url {
+        Some(url) => {
+            tracing::info!("DATABASE_URL set — using Postgres TenantStore; running migrations");
+            let store = hive_tenant_gateway::tenant::pg::PgTenantStore::connect(&url).await?;
+            store.migrate().await?;
+            Arc::new(store)
+        }
+        None => {
+            tracing::info!("DATABASE_URL unset — using in-memory TenantStore (dev mode)");
+            let store = InMemoryTenantStore::new();
+            // Dev seed: one tenant + one fully-scoped key. Skip when running
+            // against Postgres (operator provisions tenants via /admin).
+            let tenant = store.create_tenant(seed_name, None, None).await?;
+            let mint = store
+                .mint_api_key(
+                    tenant.id,
+                    vec![ApiKeyScope::ToolsInvoke, ApiKeyScope::Orchestrate],
+                )
+                .await?;
+            eprintln!();
+            eprintln!("[tenant-gateway] dev seed tenant ready");
+            eprintln!("[tenant-gateway]   tenant_id   = {}", tenant.id);
+            eprintln!("[tenant-gateway]   tenant_name = {}", tenant.name);
+            eprintln!("[tenant-gateway]   plan        = {}", tenant.plan);
+            eprintln!("[tenant-gateway]   API KEY (shown once) = {}", mint.plaintext);
+            eprintln!();
+            eprintln!(
+                "Try: curl -H 'Authorization: Bearer {}' http://{}/v1/whoami",
+                mint.plaintext, bind
+            );
+            eprintln!();
+            Arc::new(store)
+        }
+    };
 
-    let state = AppState::new(tenants, tools, frontier_factory);
+    let mut state = AppState::new(tenants, tools, frontier_factory);
+    if let Some(key) = admin_key {
+        state = state.with_admin_key(key);
+    }
     let app = router(state);
 
     let listener = TcpListener::bind(&bind).await?;
