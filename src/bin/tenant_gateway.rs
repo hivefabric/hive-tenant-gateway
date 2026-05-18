@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use hive_mcp_gateway::{tools::HttpMcpTools, HoneycombClient};
 use hive_tenant_gateway::{
-    router, tenant::ApiKeyScope, AppState, InMemoryTenantStore, TenantStore,
+    router, tenant::ApiKeyScope, AppState, DefaultFrontierLlmFactory, FrontierLlmFactory,
+    InMemoryTenantStore, TenantStore,
 };
 use tokio::net::TcpListener;
 
@@ -43,10 +44,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         honeycomb_api_key,
     )));
     let tenants: Arc<dyn TenantStore> = Arc::new(InMemoryTenantStore::new());
+    let frontier_factory: Arc<dyn FrontierLlmFactory> = Arc::new(DefaultFrontierLlmFactory);
 
     let tenant = tenants.create_tenant(seed_name, None, None).await?;
     let mint = tenants
-        .mint_api_key(tenant.id, vec![ApiKeyScope::ToolsInvoke])
+        .mint_api_key(
+            tenant.id,
+            vec![ApiKeyScope::ToolsInvoke, ApiKeyScope::Orchestrate],
+        )
         .await?;
     eprintln!();
     eprintln!("[tenant-gateway] dev seed tenant ready");
@@ -61,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     eprintln!();
 
-    let state = AppState::new(tenants, tools);
+    let state = AppState::new(tenants, tools, frontier_factory);
     let app = router(state);
 
     let listener = TcpListener::bind(&bind).await?;

@@ -11,10 +11,15 @@
 pub mod auth;
 pub mod budget;
 pub mod error;
+pub mod frontier;
 pub mod routes;
 pub mod tenant;
 
 pub use error::{GatewayError, GatewayResult};
+pub use frontier::{
+    DefaultFrontierLlmFactory, FrontierLlm, FrontierLlmError, FrontierLlmFactory,
+    LlmProviderConfig,
+};
 pub use tenant::{ApiKey, ApiKeyScope, InMemoryTenantStore, Tenant, TenantStore};
 
 use std::sync::Arc;
@@ -31,11 +36,20 @@ pub type DynMcpTools = Arc<dyn McpTools + Send + Sync + 'static>;
 pub struct AppState {
     pub tenants: Arc<dyn TenantStore>,
     pub tools: DynMcpTools,
+    pub frontier_factory: Arc<dyn FrontierLlmFactory>,
 }
 
 impl AppState {
-    pub fn new(tenants: Arc<dyn TenantStore>, tools: DynMcpTools) -> Self {
-        Self { tenants, tools }
+    pub fn new(
+        tenants: Arc<dyn TenantStore>,
+        tools: DynMcpTools,
+        frontier_factory: Arc<dyn FrontierLlmFactory>,
+    ) -> Self {
+        Self {
+            tenants,
+            tools,
+            frontier_factory,
+        }
     }
 }
 
@@ -45,5 +59,6 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::health::router())
         .merge(routes::mcp::router())
         .merge(routes::admin::router())
+        .merge(routes::orchestrate::router())
         .with_state(state)
 }
