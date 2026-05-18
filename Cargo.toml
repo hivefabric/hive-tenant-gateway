@@ -1,0 +1,38 @@
+[package]
+name = "hive-tenant-gateway"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Multi-tenant BYO-LLM HTTP gateway for HiveFabric. Each customer brings their own frontier LLM via API and dispatches work to the Comb network through MCP-equivalent tools."
+
+[dependencies]
+argon2 = "0.5"
+async-trait = "0.1"
+axum = { version = "0.7", features = ["macros"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+hive-mcp-gateway = { path = "../hive-mcp-gateway" }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+hyper = "1"
+http-body-util = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+tower = { version = "0.5", features = ["util"] }
+
+[features]
+default = []
+
+[[bin]]
+name = "tenant-gateway"
+path = "src/bin/tenant_gateway.rs"
+required-features = []
