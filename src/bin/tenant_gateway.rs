@@ -56,6 +56,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )));
     let frontier_factory: Arc<dyn FrontierLlmFactory> = Arc::new(DefaultFrontierLlmFactory);
 
+    let demo_queen_urn = std::env::var("DEMO_QUEEN_URN").ok();
+    let mut dev_seed_key: Option<String> = None;
+
     let tenants: Arc<dyn TenantStore> = match database_url {
         Some(url) => {
             tracing::info!("DATABASE_URL set — using Postgres TenantStore; running migrations");
@@ -75,6 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     vec![ApiKeyScope::ToolsInvoke, ApiKeyScope::Orchestrate],
                 )
                 .await?;
+            dev_seed_key = Some(mint.plaintext.clone());
             eprintln!();
             eprintln!("[tenant-gateway] dev seed tenant ready");
             eprintln!("[tenant-gateway]   tenant_id   = {}", tenant.id);
@@ -86,6 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Try: curl -H 'Authorization: Bearer {}' http://{}/v1/whoami",
                 mint.plaintext, bind
             );
+            eprintln!("Demo console: http://{}/ui", bind);
             eprintln!();
             Arc::new(store)
         }
@@ -94,6 +99,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = AppState::new(tenants, tools, frontier_factory);
     if let Some(key) = admin_key {
         state = state.with_admin_key(key);
+    }
+    if let Some(key) = dev_seed_key {
+        state = state.with_dev_seed_key(key);
+    }
+    if let Some(urn) = demo_queen_urn {
+        state = state.with_demo_queen_urn(urn);
     }
     let app = router(state);
 

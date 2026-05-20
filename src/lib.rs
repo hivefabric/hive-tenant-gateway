@@ -40,6 +40,13 @@ pub struct AppState {
     /// Plaintext admin key required on `/admin/v1/*`. `None` disables the
     /// admin surface entirely (every admin route returns 503).
     pub admin_key: Option<String>,
+    /// Dev-mode seed-tenant bearer; baked into the demo `/ui` page so the
+    /// console works out of the box. `None` in production (operator
+    /// provisions tenants via `/admin/v1/*`).
+    pub dev_seed_key: Option<String>,
+    /// Default capability URN to suggest in the demo console's URN field.
+    /// Defaults to the queen-decompose URN when not set.
+    pub demo_queen_urn: Option<String>,
 }
 
 impl AppState {
@@ -53,12 +60,24 @@ impl AppState {
             tools,
             frontier_factory,
             admin_key: None,
+            dev_seed_key: None,
+            demo_queen_urn: None,
         }
     }
 
     /// Enable the admin surface by setting the expected `x-admin-key` value.
     pub fn with_admin_key(mut self, admin_key: String) -> Self {
         self.admin_key = Some(admin_key);
+        self
+    }
+
+    pub fn with_dev_seed_key(mut self, key: String) -> Self {
+        self.dev_seed_key = Some(key);
+        self
+    }
+
+    pub fn with_demo_queen_urn(mut self, urn: String) -> Self {
+        self.demo_queen_urn = Some(urn);
         self
     }
 }
@@ -70,5 +89,6 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::mcp::router())
         .merge(routes::admin::router())
         .merge(routes::orchestrate::router())
+        .merge(routes::ui::router())
         .with_state(state)
 }
