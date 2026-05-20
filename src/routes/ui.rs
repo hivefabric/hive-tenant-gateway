@@ -376,6 +376,34 @@ async function renderWorkflow(inner) {
     try { await mermaid.run({ nodes: wfAst.querySelectorAll('.mermaid') }); } catch (e) {
       wfAst.textContent = 'mermaid render failed: ' + e.message + '\n\n' + mermaidSrc;
     }
+  } else if (inner && inner.mode === 'fallback_inference') {
+    // Free-text prompt — queen routed it to a generic-inference comb.
+    // Render a tiny one-hop graph instead of an AST.
+    const step = trace[0] || {};
+    const target = shortenUrn(step.urn || inner.fallback_reason || '');
+    const ms = step.execution_time_ms != null ? `${step.execution_time_ms} ms` : '';
+    const model = step.model || '';
+    const comb = step.assigned_node_id ? step.assigned_node_id.slice(0, 8) + '…' : '';
+    const queenLabel = `<b>queen</b><br/>${escapeHtml((inner.fallback_reason || 'fallback').slice(0, 60))}`;
+    const workerLabel = [
+      `<b>inference</b>`,
+      `<i>${target}</i>`,
+      model ? `<small>model: ${model}</small>` : '',
+      comb ? `<small>comb: ${comb}</small>` : '',
+      ms ? `<small>${ms}</small>` : '',
+    ].filter(Boolean).join('<br/>');
+    const mermaidSrc = [
+      'graph TD',
+      'classDef queen fill:#fff3c4,stroke:#b88800,color:#1a1300,font-weight:bold',
+      'classDef worker fill:#d1f0d3,stroke:#3fb950,color:#0d3318',
+      `q0["${queenLabel}"] --> w0["${workerLabel}"]`,
+      'class q0 queen',
+      'class w0 worker',
+    ].join('\n');
+    wfAst.innerHTML = `<div class="mermaid">${mermaidSrc}</div>`;
+    try { await mermaid.run({ nodes: wfAst.querySelectorAll('.mermaid') }); } catch (e) {
+      wfAst.textContent = 'mermaid render failed: ' + e.message;
+    }
   } else {
     wfAst.innerHTML = '<div style="padding:40px;text-align:center;color:#888">'
       + 'No AST in response (set <code>include_ast = true</code> on the queen capability config).</div>';
@@ -384,6 +412,7 @@ async function renderWorkflow(inner) {
   // Sequence diagram: from user → tg → honeycomb → queen → workers.
   // We don't have wall-time-ordered records of every hop, but each trace
   // step is one full sub-task round trip, so we can render them in order.
+  const promptShort = $('prompt').value.trim().slice(0, 40);
   const seqLines = [
     'sequenceDiagram',
     '    autonumber',
@@ -393,18 +422,28 @@ async function renderWorkflow(inner) {
     '    participant Q as Queen Comb',
     '    participant W as Worker Comb',
     '    participant O as Ollama',
-    `    U->>+TG: prompt "${escapeHtml((expr || '?').slice(0, 40))}"`,
+    `    U->>+TG: prompt "${escapeHtml(promptShort)}"`,
     `    TG->>+HC: TaskCreate(${shortenUrn(queenUrn)})`,
     '    HC->>+Q: ExecuteRequest',
   ];
   trace.forEach(step => {
-    const sym = ({add: '+', sub: '-', mul: '*', div: '/'}[step.op] || step.op);
-    const a = step.inputs && step.inputs.a;
-    const b = step.inputs && step.inputs.b;
     const nodeShort = step.assigned_node_id ? step.assigned_node_id.slice(0, 8) : '?';
     const model = step.model || '?';
     const ms = step.execution_time_ms != null ? step.execution_time_ms : '?';
     const queueMs = step.queue_time_ms != null ? step.queue_time_ms : '?';
+    if (step.kind === 'inference_fallback') {
+      seqLines.push(`    Note over Q,W: fallback · ${shortenUrn(step.urn)} · comb ${nodeShort}… · ${model}`);
+      seqLines.push(`    Q->>+HC: TaskCreate(${shortenUrn(step.urn)}, prompt="${escapeHtml((step.inputs && step.inputs.prompt || '').slice(0, 30))}")`);
+      seqLines.push(`    HC->>+W: ExecuteRequest (queued ${queueMs} ms)`);
+      seqLines.push(`    W->>+O: chat completion (${model})`);
+      seqLines.push(`    O-->>-W: assistant text`);
+      seqLines.push(`    W-->>-HC: succeeded — ${ms} ms`);
+      seqLines.push(`    HC-->>-Q: result`);
+      return;
+    }
+    const sym = ({add: '+', sub: '-', mul: '*', div: '/'}[step.op] || step.op);
+    const a = step.inputs && step.inputs.a;
+    const b = step.inputs && step.inputs.b;
     seqLines.push(`    Note over Q,W: step ${step.step} · ${shortenUrn(step.urn)} · comb ${nodeShort}… · ${model}`);
     seqLines.push(`    Q->>+HC: TaskCreate(${shortenUrn(step.urn)}, ${a} ${sym} ${b})`);
     seqLines.push(`    HC->>+W: ExecuteRequest (queued ${queueMs} ms)`);
@@ -456,6 +495,28 @@ function renderTraceItem(t) {
     const tools = (t.tools || []).map(renderTool).join('');
     return '<div class="turn kind-tool"><div class="head">iteration ' + t.iteration +
            ' · tool_turn · ' + (t.tools || []).length + ' call(s)</div>' + tools + '</div>';
+  }
+  if (t && t.kind === 'inference_fallback') {
+    // queen:expression's fallback path — non-arithmetic prompt routed
+    // verbatim to a generic-inference comb.
+    const stepNo = t.step ?? '?';
+    const promptText = (t.inputs && t.inputs.prompt) || '';
+    const value = t.value || '(no text returned)';
+    const meta = [
+      t.model ? `model: ${t.model}` : null,
+      t.assigned_node_id ? `comb: ${t.assigned_node_id.slice(0, 8)}…` : null,
+      t.execution_time_ms != null ? `${t.execution_time_ms} ms` : null,
+    ].filter(Boolean).join(' · ');
+    const raw = t.raw_result
+      ? '<details><summary>raw sub-task result</summary><pre>' +
+        escapeHtml(JSON.stringify(t.raw_result, null, 2)) + '</pre></details>'
+      : '';
+    return '<div class="turn kind-step"><div class="head">step ' + stepNo +
+           ' · inference fallback · ' + escapeHtml(t.urn || '') + '</div>' +
+           '<div class="meta">prompt: ' + escapeHtml(promptText) + '</div>' +
+           '<pre>' + escapeHtml(value) + '</pre>' +
+           (meta ? '<div class="meta">' + meta + '</div>' : '') +
+           raw + '</div>';
   }
   if (t && t.op !== undefined) {
     // queen:expression step
