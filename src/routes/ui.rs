@@ -296,8 +296,8 @@ async function renderWorkflow(inner) {
   const queenUrn = $('urn').value.trim();
 
   // Annotate AST: walk post-order, attach the matching trace step's
-  // `urn` and `value` to each Binary node. queen:expression evaluates
-  // post-order so the trace order matches.
+  // `urn`, `value`, timing, model, and node-id to each Binary node.
+  // queen:expression evaluates post-order so the trace order matches.
   let stepCursor = 0;
   function annotate(node) {
     if (!node) return;
@@ -309,6 +309,10 @@ async function renderWorkflow(inner) {
         node._urn = step.urn;
         node._value = step.value;
         node._step = step.step;
+        node._model = step.model || null;
+        node._node = step.assigned_node_id || null;
+        node._ms = step.execution_time_ms != null ? step.execution_time_ms : null;
+        node._queue_ms = step.queue_time_ms != null ? step.queue_time_ms : null;
       }
     }
   }
@@ -331,7 +335,18 @@ async function renderWorkflow(inner) {
         const agentName = shortenUrn(node._urn || '');
         const value = node._value !== undefined ? node._value : '?';
         const stepLabel = node._step ? `step ${node._step}` : '';
-        const label = `${stepLabel}<br/><b>${sym}</b> → <b>${value}</b><br/><i>${agentName}</i>`;
+        const nodeShort = node._node ? node._node.slice(0, 8) : '';
+        const ms = node._ms != null ? `${node._ms} ms` : '';
+        const model = node._model || '';
+        // Multi-line label: step header + op/value + agent + comb + model + timing.
+        const lineParts = [
+          `<b>${sym}</b> → <b>${value}</b>`,
+          `<i>${agentName}</i>`,
+        ];
+        if (model) lineParts.push(`<small>model: ${model}</small>`);
+        if (nodeShort) lineParts.push(`<small>comb: ${nodeShort}…</small>`);
+        if (ms) lineParts.push(`<small>${ms}</small>`);
+        const label = (stepLabel ? `${stepLabel}<br/>` : '') + lineParts.join('<br/>');
         lines.push(`${id}["${label}"]`);
         classDefs.push(`class ${id} worker`);
         const leftId = visit(node.left);
@@ -386,11 +401,16 @@ async function renderWorkflow(inner) {
     const sym = ({add: '+', sub: '-', mul: '*', div: '/'}[step.op] || step.op);
     const a = step.inputs && step.inputs.a;
     const b = step.inputs && step.inputs.b;
+    const nodeShort = step.assigned_node_id ? step.assigned_node_id.slice(0, 8) : '?';
+    const model = step.model || '?';
+    const ms = step.execution_time_ms != null ? step.execution_time_ms : '?';
+    const queueMs = step.queue_time_ms != null ? step.queue_time_ms : '?';
+    seqLines.push(`    Note over Q,W: step ${step.step} · ${shortenUrn(step.urn)} · comb ${nodeShort}… · ${model}`);
     seqLines.push(`    Q->>+HC: TaskCreate(${shortenUrn(step.urn)}, ${a} ${sym} ${b})`);
-    seqLines.push('    HC->>+W: ExecuteRequest');
-    seqLines.push(`    W->>+O: chat completion`);
+    seqLines.push(`    HC->>+W: ExecuteRequest (queued ${queueMs} ms)`);
+    seqLines.push(`    W->>+O: chat completion (${model})`);
     seqLines.push(`    O-->>-W: "${step.value}"`);
-    seqLines.push(`    W-->>-HC: succeeded(${step.value})`);
+    seqLines.push(`    W-->>-HC: succeeded(${step.value}) — ${ms} ms`);
     seqLines.push(`    HC-->>-Q: result(${step.value})`);
   });
   seqLines.push(`    Q-->>-HC: succeeded(${finalVal})`);
