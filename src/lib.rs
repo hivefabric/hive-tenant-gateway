@@ -47,6 +47,17 @@ pub struct AppState {
     /// Default capability URN to suggest in the demo console's URN field.
     /// Defaults to the queen-decompose URN when not set.
     pub demo_queen_urn: Option<String>,
+    /// Tenant id of the dev seed tenant, surfaced by the UI overview
+    /// panel for ledger balance lookups. `None` in production.
+    pub dev_seed_tenant_id: Option<uuid::Uuid>,
+    /// Honeycomb base URL (for proxied dashboard calls). Mirrors the
+    /// upstream `HONEYCOMB_URL` env var.
+    pub honeycomb_url: Option<String>,
+    /// Honeycomb API key (for proxied dashboard calls).
+    pub honeycomb_api_key: Option<String>,
+    /// Hive ledger base URL. `None` disables ledger panels in the UI
+    /// overview.
+    pub ledger_url: Option<String>,
 }
 
 impl AppState {
@@ -62,6 +73,10 @@ impl AppState {
             admin_key: None,
             dev_seed_key: None,
             demo_queen_urn: None,
+            dev_seed_tenant_id: None,
+            honeycomb_url: None,
+            honeycomb_api_key: None,
+            ledger_url: None,
         }
     }
 
@@ -80,6 +95,22 @@ impl AppState {
         self.demo_queen_urn = Some(urn);
         self
     }
+
+    pub fn with_dev_seed_tenant_id(mut self, id: uuid::Uuid) -> Self {
+        self.dev_seed_tenant_id = Some(id);
+        self
+    }
+
+    pub fn with_honeycomb_dashboard(mut self, url: String, api_key: Option<String>) -> Self {
+        self.honeycomb_url = Some(url);
+        self.honeycomb_api_key = api_key;
+        self
+    }
+
+    pub fn with_ledger_url(mut self, url: String) -> Self {
+        self.ledger_url = Some(url);
+        self
+    }
 }
 
 /// Build the axum `Router` for the tenant gateway.
@@ -90,5 +121,6 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::admin::router())
         .merge(routes::orchestrate::router())
         .merge(routes::ui::router())
+        .merge(routes::demo::router())
         .with_state(state)
 }

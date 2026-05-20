@@ -1,9 +1,11 @@
 //! Demo UI served by the tenant gateway at `GET /ui`.
 //!
-//! Bare HTML + vanilla JS — no build step, no framework. Posts a queen task
-//! to `/v1/mcp/tools/call` and renders the response. Designed to give a
-//! human-visible end-to-end demo of the orchestrator → workers flow without
-//! requiring the operator to assemble curl commands by hand.
+//! Two panels:
+//!   * Submit form + result/trace — exercises the full
+//!     orchestrator → workers → SLM flow via `/v1/mcp/tools/call`.
+//!   * Stack overview — pulls aggregated network state from
+//!     `/v1/_demo/overview` (nodes, recent tasks, capabilities, ledger
+//!     balance + events). Auto-refreshes every 5 s.
 //!
 //! When the gateway is started in dev mode (in-memory tenant store with a
 //! seed tenant), the seed bearer is interpolated into the HTML so the form
@@ -65,6 +67,7 @@ const TEMPLATE: &str = r##"<!doctype html>
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 18px; }
   .panel h2 { margin: 0 0 12px; font-size: 13px; font-weight: 700;
               text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); }
+  .panel.full { grid-column: 1 / -1; }
   label { display: block; margin: 12px 0 4px; color: var(--muted); font-size: 12px; }
   textarea, input { width: 100%; background: var(--code); color: var(--text);
                     border: 1px solid var(--border); border-radius: 4px;
@@ -83,12 +86,31 @@ const TEMPLATE: &str = r##"<!doctype html>
           border-radius: 4px; padding: 10px 12px; font-size: 12px; }
   .turn .head { color: var(--muted); margin-bottom: 6px; }
   .turn.kind-final .head { color: var(--good); }
-  .turn.kind-tool .head { color: var(--accent); }
+  .turn.kind-tool .head, .turn.kind-step .head { color: var(--accent); }
   .turn pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; }
   .err { color: var(--bad); }
   .meta { color: var(--muted); font-size: 11px; margin-top: 8px; }
   details { margin-top: 6px; }
   summary { cursor: pointer; color: var(--muted); }
+
+  /* Overview tables */
+  .overview { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 8px; }
+  @media (max-width: 1100px) { .overview { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 600px)  { .overview { grid-template-columns: 1fr;     } }
+  .stat { background: var(--code); border: 1px solid var(--border); border-radius: 4px; padding: 10px 12px; }
+  .stat .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .stat .value { font-size: 22px; font-weight: 700; color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; }
+  td.mono { color: var(--text); }
+  td .ok  { color: var(--good); }
+  td .bad { color: var(--bad); }
+  .ov-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 14px; }
+  @media (max-width: 1100px) { .ov-grid { grid-template-columns: 1fr; } }
+  .ov-grid h3 { margin: 0 0 8px; font-size: 11px; color: var(--muted);
+                text-transform: uppercase; letter-spacing: 0.06em; }
+  .truncate { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -107,10 +129,12 @@ const TEMPLATE: &str = r##"<!doctype html>
     <input id="urn" value="{{QUEEN_URN}}" />
     <button id="go">▶ run</button>
     <div class="meta">
-      The queen comb decomposes your prompt into sub-tasks via Anthropic, dispatches each as a new
-      task to the worker comb, and aggregates the results.
+      The queen comb decomposes your prompt into sub-tasks, dispatches each as a new task
+      to the worker comb, and aggregates the results. Default queen handler is
+      <code>queen:expression</code> (deterministic, no LLM key needed).
     </div>
   </section>
+
   <section class="panel">
     <h2>Result</h2>
     <label>final_message</label>
@@ -119,13 +143,56 @@ const TEMPLATE: &str = r##"<!doctype html>
     <div id="trace" class="trace"></div>
     <div class="meta" id="meta"></div>
   </section>
+
+  <section class="panel full">
+    <h2>Stack overview · auto-refresh 5 s</h2>
+    <div class="overview">
+      <div class="stat"><div class="label">combs registered</div><div class="value" id="ov-nodes">—</div></div>
+      <div class="stat"><div class="label">capabilities</div><div class="value" id="ov-caps">—</div></div>
+      <div class="stat"><div class="label">recent tasks</div><div class="value" id="ov-tasks">—</div></div>
+      <div class="stat"><div class="label">ledger balance</div><div class="value" id="ov-ledger">—</div></div>
+    </div>
+    <div class="ov-grid">
+      <div>
+        <h3>Combs</h3>
+        <table id="ov-nodes-tbl">
+          <thead><tr><th>node_id</th><th>profiles</th><th>cpu%</th><th>mem%</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div>
+        <h3>Capabilities</h3>
+        <table id="ov-caps-tbl">
+          <thead><tr><th>urn</th><th>workload</th><th>p50 ms</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div>
+        <h3>Recent tasks</h3>
+        <table id="ov-tasks-tbl">
+          <thead><tr><th>task_id</th><th>status</th><th>node</th><th>ms</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div>
+        <h3>Ledger events</h3>
+        <table id="ov-ledger-tbl">
+          <thead><tr><th>kind</th><th>delta</th><th>correlation</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="meta" id="ov-meta"></div>
+  </section>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
+
+// ─── Submit panel ──────────────────────────────────────────────────────
 $('go').addEventListener('click', async () => {
   const prompt = $('prompt').value.trim();
-  const key = $('key').value.trim();
-  const urn = $('urn').value.trim();
+  const key    = $('key').value.trim();
+  const urn    = $('urn').value.trim();
   if (!prompt || !key || !urn) { alert('prompt, key, and URN are required'); return; }
   $('go').disabled = true;
   $('final').innerHTML = '⏳ running …';
@@ -147,40 +214,152 @@ $('go').addEventListener('click', async () => {
       $('final').innerHTML = '<span class="err">error ' + resp.status + '</span>\n' + JSON.stringify(body, null, 2);
       return;
     }
-    const inner = body.output && body.output.output ? body.output.output : (body.output || body);
+    const inner = unwrap(body);
     const finalMsg = inner.final_message || inner.text || JSON.stringify(inner, null, 2);
     $('final').textContent = finalMsg;
     const trace = Array.isArray(inner.trace) ? inner.trace : [];
-    $('trace').innerHTML = trace.map(renderTurn).join('');
-    $('meta').textContent = 'iterations: ' + (inner.iterations ?? '—') +
-                            ' · model: ' + (inner.model ?? '—') +
-                            ' · wall: ' + dt + ' ms';
+    $('trace').innerHTML = trace.map(renderTraceItem).join('') || '<div class="meta">(no trace)</div>';
+    const parts = [];
+    if (inner.iterations !== undefined) parts.push('iterations: ' + inner.iterations);
+    if (inner.expression)               parts.push('expr: ' + inner.expression);
+    if (inner.result !== undefined)     parts.push('result: ' + inner.result);
+    if (inner.model)                    parts.push('model: ' + inner.model);
+    parts.push('wall: ' + dt + ' ms');
+    $('meta').textContent = parts.join(' · ');
   } catch (e) {
-    $('final').innerHTML = '<span class="err">' + e.message + '</span>';
+    $('final').innerHTML = '<span class="err">' + escapeHtml(e.message) + '</span>';
   } finally {
     $('go').disabled = false;
+    refreshOverview(); // immediate refresh after a task
   }
 });
-function renderTurn(t) {
-  const kind = t.kind || 'unknown';
-  if (kind === 'final_turn') {
-    return '<div class="turn kind-final"><div class="head">iteration ' + t.iteration + ' · final_turn</div>' +
+
+function unwrap(body) {
+  // tenant-gateway wraps run_subagent's result as `output`. Honeycomb's
+  // TaskView wraps the agent output again as `output`. Peel both.
+  const outer = body && body.output ? body.output : body;
+  if (outer && outer.output && (outer.status || outer.task_id)) return outer.output;
+  return outer || body;
+}
+
+function renderTraceItem(t) {
+  // Two trace shapes:
+  //   queen:expression — { step, op, urn, inputs, raw_result, value }
+  //   queen:anthropic  — { iteration, kind: "tool_turn"|"final_turn", tools|text }
+  if (t && t.kind === 'final_turn') {
+    return '<div class="turn kind-final"><div class="head">iteration ' + t.iteration + ' · final</div>' +
            '<pre>' + escapeHtml(t.text || '') + '</pre></div>';
   }
-  const tools = (t.tools || []).map(renderTool).join('');
-  return '<div class="turn kind-tool"><div class="head">iteration ' + t.iteration +
-         ' · tool_turn · ' + (t.tools || []).length + ' call(s)</div>' + tools + '</div>';
+  if (t && t.kind === 'tool_turn') {
+    const tools = (t.tools || []).map(renderTool).join('');
+    return '<div class="turn kind-tool"><div class="head">iteration ' + t.iteration +
+           ' · tool_turn · ' + (t.tools || []).length + ' call(s)</div>' + tools + '</div>';
+  }
+  if (t && t.op !== undefined) {
+    // queen:expression step
+    const stepNo = t.step ?? '?';
+    const args = JSON.stringify(t.inputs || {}, null, 2);
+    const value = t.value !== undefined ? String(t.value) : '?';
+    const drift = t.slm_drift
+      ? '<div class="meta err">slm drift: said ' + escapeHtml(String(t.slm_drift.slm_said)) +
+        ', actual ' + escapeHtml(String(t.slm_drift.actual)) + '</div>'
+      : '';
+    const raw = t.raw_result
+      ? '<details><summary>raw sub-task result</summary><pre>' +
+        escapeHtml(JSON.stringify(t.raw_result, null, 2)) + '</pre></details>'
+      : '';
+    return '<div class="turn kind-step"><div class="head">step ' + stepNo + ' · ' +
+           escapeHtml(t.op) + ' · → ' + escapeHtml(value) + '</div>' +
+           '<div>' + escapeHtml(t.urn || '') + '</div>' +
+           '<pre>' + escapeHtml(args) + '</pre>' + drift + raw + '</div>';
+  }
+  return '<div class="turn"><pre>' + escapeHtml(JSON.stringify(t, null, 2)) + '</pre></div>';
 }
+
 function renderTool(tc) {
-  const args = JSON.stringify(tc.input, null, 2);
+  const args = JSON.stringify(tc.input ?? tc.arguments ?? {}, null, 2);
   const result = tc.error
     ? '<span class="err">error: ' + escapeHtml(tc.error) + '</span>'
     : '<pre>' + escapeHtml(JSON.stringify(tc.result, null, 2)) + '</pre>';
   return '<details open><summary>' + escapeHtml(tc.name) + '(' + escapeHtml(args) + ')</summary>' + result + '</details>';
 }
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
+
+// ─── Overview panel ────────────────────────────────────────────────────
+async function refreshOverview() {
+  const key = $('key').value.trim();
+  if (!key) return;
+  try {
+    const resp = await fetch('/v1/_demo/overview', {
+      headers: { 'authorization': 'Bearer ' + key },
+    });
+    if (!resp.ok) { $('ov-meta').textContent = 'overview: ' + resp.status; return; }
+    const data = await resp.json();
+    renderOverview(data);
+  } catch (e) {
+    $('ov-meta').textContent = 'overview error: ' + e.message;
+  }
+}
+
+function renderOverview(d) {
+  const nodes = Array.isArray(d.nodes) ? d.nodes : [];
+  const caps  = (d.capabilities && Array.isArray(d.capabilities.capabilities))
+                  ? d.capabilities.capabilities
+                  : [];
+  const tasks = Array.isArray(d.tasks) ? d.tasks : [];
+
+  $('ov-nodes').textContent = nodes.length;
+  $('ov-caps').textContent  = caps.length;
+  $('ov-tasks').textContent = tasks.length;
+  $('ov-ledger').textContent =
+    (d.ledger_balance !== undefined && d.ledger_balance !== null) ? d.ledger_balance : '—';
+
+  $('ov-nodes-tbl').querySelector('tbody').innerHTML = nodes.map(n => {
+    const id   = (n.node_id || '').slice(0, 8) + '…';
+    const prof = (n.llm_profiles || []).join(', ');
+    const cpu  = n.cpu_usage_percent  !== undefined && n.cpu_usage_percent  !== null
+                 ? n.cpu_usage_percent.toFixed(0) + '%' : '—';
+    const mem  = n.memory_usage_percent !== undefined && n.memory_usage_percent !== null
+                 ? n.memory_usage_percent.toFixed(0) + '%' : '—';
+    return '<tr><td class="mono truncate">' + escapeHtml(id) + '</td><td>' +
+            escapeHtml(prof) + '</td><td>' + cpu + '</td><td>' + mem + '</td></tr>';
+  }).join('') || '<tr><td colspan="4" class="meta">no combs</td></tr>';
+
+  $('ov-caps-tbl').querySelector('tbody').innerHTML = caps.map(c =>
+    '<tr><td class="mono truncate">' + escapeHtml(c.urn || '') +
+    '</td><td>' + escapeHtml(c.workload || c.handler || '') +
+    '</td><td>' + (c.latency_p50_ms ?? '—') + '</td></tr>'
+  ).join('') || '<tr><td colspan="3" class="meta">no capabilities</td></tr>';
+
+  $('ov-tasks-tbl').querySelector('tbody').innerHTML = tasks.slice(0, 10).map(t => {
+    const tid = (t.task_id || '').slice(0, 8) + '…';
+    const stat = t.status || '—';
+    const cls = stat === 'succeeded' ? 'ok' : (stat === 'failed' || stat === 'timed_out' ? 'bad' : '');
+    const node = (t.assigned_node_id || '').slice(0, 8) + (t.assigned_node_id ? '…' : '—');
+    return '<tr><td class="mono truncate">' + escapeHtml(tid) + '</td><td><span class="' +
+            cls + '">' + escapeHtml(stat) + '</span></td><td class="mono truncate">' +
+            escapeHtml(node) + '</td><td>' + (t.execution_time_ms ?? '—') + '</td></tr>';
+  }).join('') || '<tr><td colspan="4" class="meta">no tasks</td></tr>';
+
+  const events = (d.ledger_events && Array.isArray(d.ledger_events))
+                   ? d.ledger_events
+                   : (d.ledger_events && Array.isArray(d.ledger_events.events))
+                       ? d.ledger_events.events
+                       : [];
+  $('ov-ledger-tbl').querySelector('tbody').innerHTML = events.slice(0, 10).map(e =>
+    '<tr><td>' + escapeHtml(e.kind || '') +
+    '</td><td>' + (e.delta_credits ?? '—') +
+    '</td><td class="mono truncate">' + escapeHtml(e.correlation || '') + '</td></tr>'
+  ).join('') || '<tr><td colspan="3" class="meta">no events (ledger may be off, see configuration)</td></tr>';
+
+  $('ov-meta').textContent = 'tenant_id: ' + (d.tenant_id || '—') + ' · refreshed ' + new Date().toISOString().slice(11, 19);
+}
+
+setInterval(refreshOverview, 5000);
+refreshOverview();
 </script>
 </body>
 </html>"##;

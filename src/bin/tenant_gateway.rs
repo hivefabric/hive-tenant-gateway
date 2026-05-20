@@ -41,6 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let admin_key = std::env::var("HF_ADMIN_KEY").ok();
     let database_url = std::env::var("DATABASE_URL").ok();
     let seed_name = std::env::var("SEED_TENANT_NAME").unwrap_or_else(|_| "dev".into());
+    let ledger_url = std::env::var("LEDGER_URL").ok();
 
     tracing::info!(%bind, %honeycomb_url, "tenant-gateway starting");
     if admin_key.is_none() {
@@ -51,13 +52,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let tools = Arc::new(HttpMcpTools::new(HoneycombClient::new(
-        honeycomb_url,
-        honeycomb_api_key,
+        honeycomb_url.clone(),
+        honeycomb_api_key.clone(),
     )));
     let frontier_factory: Arc<dyn FrontierLlmFactory> = Arc::new(DefaultFrontierLlmFactory);
 
     let demo_queen_urn = std::env::var("DEMO_QUEEN_URN").ok();
     let mut dev_seed_key: Option<String> = None;
+    let mut dev_seed_tenant_id: Option<uuid::Uuid> = None;
 
     let tenants: Arc<dyn TenantStore> = match database_url {
         Some(url) => {
@@ -79,6 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .await?;
             dev_seed_key = Some(mint.plaintext.clone());
+            dev_seed_tenant_id = Some(tenant.id);
             eprintln!();
             eprintln!("[tenant-gateway] dev seed tenant ready");
             eprintln!("[tenant-gateway]   tenant_id   = {}", tenant.id);
@@ -105,6 +108,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(urn) = demo_queen_urn {
         state = state.with_demo_queen_urn(urn);
+    }
+    if let Some(tid) = dev_seed_tenant_id {
+        state = state.with_dev_seed_tenant_id(tid);
+    }
+    state = state.with_honeycomb_dashboard(honeycomb_url, honeycomb_api_key);
+    if let Some(url) = ledger_url {
+        state = state.with_ledger_url(url);
     }
     let app = router(state);
 
