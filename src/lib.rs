@@ -12,6 +12,7 @@ pub mod auth;
 pub mod budget;
 pub mod error;
 pub mod frontier;
+pub mod ledger;
 pub mod routes;
 pub mod tenant;
 
@@ -56,8 +57,11 @@ pub struct AppState {
     /// Honeycomb API key (for proxied dashboard calls).
     pub honeycomb_api_key: Option<String>,
     /// Hive ledger base URL. `None` disables ledger panels in the UI
-    /// overview.
+    /// overview AND disables debit/refund recording on run_subagent.
     pub ledger_url: Option<String>,
+    /// Lazily constructed ledger client. Built on first use; `None`
+    /// when `ledger_url` is unset.
+    pub ledger_client: Option<ledger::LedgerClient>,
 }
 
 impl AppState {
@@ -77,6 +81,7 @@ impl AppState {
             honeycomb_url: None,
             honeycomb_api_key: None,
             ledger_url: None,
+            ledger_client: None,
         }
     }
 
@@ -108,6 +113,7 @@ impl AppState {
     }
 
     pub fn with_ledger_url(mut self, url: String) -> Self {
+        self.ledger_client = Some(ledger::LedgerClient::new(url.clone()));
         self.ledger_url = Some(url);
         self
     }

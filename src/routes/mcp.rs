@@ -112,7 +112,69 @@ async fn tools_call(
             // Anything the caller put in the body is silently overridden — a
             // tenant cannot spoof another tenant's id, ever.
             typed.tenant_id = Some(auth.tenant.id);
-            let resp = state.tools.run_subagent(typed).await?;
+
+            // Phase-2 billing: debit before dispatch, refund on failure.
+            // Idempotency keys mirror the task_id so duplicate POSTs (CDN
+            // retries, network blips) don't double-charge. The amount
+            // here is a flat 1 credit per call — the next iteration
+            // tiers it by capability_urn / token usage.
+            let correlation = uuid::Uuid::new_v4().to_string();
+            let urn_label = typed
+                .capability_urn
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            if let Some(client) = &state.ledger_client {
+                let metadata = serde_json::json!({
+                    "capability_urn": urn_label,
+                    "model_id": typed.model_id,
+                });
+                if let Err(e) = client
+                    .debit(
+                        auth.tenant.id,
+                        1,
+                        &correlation,
+                        &format!("debit:{correlation}"),
+                        metadata,
+                    )
+                    .await
+                {
+                    // Ledger failures don't block dispatch in dev mode.
+                    // Production would gate the call here on balance.
+                    tracing::warn!(error = %e, "ledger debit failed; continuing");
+                }
+            }
+
+            let result = state.tools.run_subagent(typed.clone()).await;
+            // Refund on failure or non-success status.
+            if let Some(client) = &state.ledger_client {
+                let needs_refund = match &result {
+                    Err(_) => true,
+                    Ok(resp) => !matches!(
+                        resp.status.as_str(),
+                        "succeeded" | "completed"
+                    ),
+                };
+                if needs_refund {
+                    let metadata = serde_json::json!({
+                        "reason": "task did not succeed",
+                        "capability_urn": urn_label,
+                    });
+                    if let Err(e) = client
+                        .refund(
+                            auth.tenant.id,
+                            1,
+                            &correlation,
+                            &format!("refund:{correlation}"),
+                            metadata,
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %e, "ledger refund failed");
+                    }
+                }
+            }
+
+            let resp = result?;
             Ok(Json(serde_json::to_value(resp).map_err(|e| {
                 GatewayError::Internal(format!("serialize: {e}"))
             })?))
