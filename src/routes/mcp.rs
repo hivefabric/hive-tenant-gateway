@@ -129,7 +129,7 @@ async fn tools_call(
                     "capability_urn": urn_label,
                     "model_id": typed.model_id,
                 });
-                if let Err(e) = client
+                match client
                     .debit(
                         auth.tenant.id,
                         1,
@@ -139,9 +139,19 @@ async fn tools_call(
                     )
                     .await
                 {
-                    // Ledger failures don't block dispatch in dev mode.
-                    // Production would gate the call here on balance.
-                    tracing::warn!(error = %e, "ledger debit failed; continuing");
+                    Ok(resp) => {
+                        // Post-debit balance flows into the ACP BudgetContext so
+                        // sub-agents can enforce per-call spending caps without a
+                        // separate ledger round-trip.
+                        if let Some(bal) = resp.get("balance").and_then(|b| b.as_i64()) {
+                            typed.credits_budget = Some(bal);
+                        }
+                    }
+                    Err(e) => {
+                        // Ledger failures don't block dispatch in dev mode.
+                        // Production would gate the call here on balance.
+                        tracing::warn!(error = %e, "ledger debit failed; continuing");
+                    }
                 }
             }
 

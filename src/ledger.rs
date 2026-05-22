@@ -54,6 +54,32 @@ impl LedgerClient {
             .await
     }
 
+    pub async fn balance(&self, tenant_id: Uuid) -> Result<i64, String> {
+        let url = format!("{}/v1/credits/{}/balance", self.base_url, tenant_id);
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("ledger balance request: {e}"))?;
+        let status = resp.status();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("ledger balance body: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "ledger balance rejected ({status}): {}",
+                String::from_utf8_lossy(&bytes)
+            ));
+        }
+        let v: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("ledger balance parse: {e}"))?;
+        v.get("balance")
+            .and_then(|b| b.as_i64())
+            .ok_or_else(|| "ledger balance missing 'balance' field".to_string())
+    }
+
     pub async fn refund(
         &self,
         tenant_id: Uuid,
