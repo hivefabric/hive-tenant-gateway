@@ -254,9 +254,11 @@ async fn dispatch_tool(
             let mut typed: RunSubagentRequest =
                 serde_json::from_value(call.arguments.clone())
                     .map_err(|e| GatewayError::Invalid(format!("run_subagent args: {e}")))?;
-            // Same rule as the tools/call path: tenant_id is forced from the
-            // bearer, never accepted from the LLM.
+            // Tenant context injected from the authenticated bearer — never
+            // accepted from the LLM/caller body.
             typed.tenant_id = Some(auth.tenant.id);
+            typed.sensitivity_required = auth.tenant.default_sensitivity.clone();
+            typed.jurisdiction_required = auth.tenant.jurisdiction_required.clone();
             let resp = state.tools.run_subagent(typed).await?;
             serde_json::to_value(resp)
                 .map_err(|e| GatewayError::Internal(format!("serialize: {e}")))

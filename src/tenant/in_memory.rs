@@ -59,6 +59,8 @@ impl TenantStore for InMemoryTenantStore {
             plan: plan.unwrap_or_else(|| "free".to_string()),
             created_at: Utc::now(),
             budget_defaults: budgets.unwrap_or_default(),
+            default_sensitivity: None,
+            jurisdiction_required: Vec::new(),
         };
         let mut g = self
             .inner

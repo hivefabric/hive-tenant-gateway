@@ -60,6 +60,10 @@ fn row_to_tenant(row: &sqlx::postgres::PgRow) -> Tenant {
             max_credits_per_call: row.get::<i64, _>("budget_default_credits") as u64,
             ttl_secs: row.get::<i64, _>("budget_default_ttl_secs") as u64,
         },
+        // Phase 2.3 migration adds these columns; until then they default to
+        // no restriction (all combs eligible).
+        default_sensitivity: None,
+        jurisdiction_required: Vec::new(),
     }
 }
 

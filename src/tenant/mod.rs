@@ -63,6 +63,16 @@ pub struct Tenant {
     pub plan: String,
     pub created_at: DateTime<Utc>,
     pub budget_defaults: BudgetDefaults,
+    /// Default sensitivity tier the tenant's tasks may request.
+    /// `None` = Public (any comb may process). Injected by the gateway into
+    /// every outbound TaskCreateRequest so tenants cannot escalate beyond their
+    /// plan-assigned tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_sensitivity: Option<String>,
+    /// Jurisdiction tags required on every task this tenant submits.
+    /// E.g. `["eu-gdpr"]` to ensure all tasks run in GDPR-compliant combs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jurisdiction_required: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

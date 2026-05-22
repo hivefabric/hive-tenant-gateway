@@ -108,10 +108,11 @@ async fn tools_call(
         "run_subagent" => {
             let mut typed: RunSubagentRequest = serde_json::from_value(req.arguments)
                 .map_err(|e| GatewayError::Invalid(format!("run_subagent args: {e}")))?;
-            // Source of truth for tenant_id is the authenticated bearer.
-            // Anything the caller put in the body is silently overridden — a
-            // tenant cannot spoof another tenant's id, ever.
+            // Source of truth for tenant context is the authenticated bearer.
+            // Anything the caller put in the body is silently overridden.
             typed.tenant_id = Some(auth.tenant.id);
+            typed.sensitivity_required = auth.tenant.default_sensitivity.clone();
+            typed.jurisdiction_required = auth.tenant.jurisdiction_required.clone();
 
             // Phase-2 billing: debit before dispatch, refund on failure.
             // Idempotency keys mirror the task_id so duplicate POSTs (CDN
