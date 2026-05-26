@@ -78,6 +78,50 @@ pub struct NewLlmProvider {
     pub is_default: bool,
 }
 
+/// Per-tenant routing and quality preferences ("sliders").
+/// Applied by the gateway to every outbound task request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenantPreferences {
+    /// 0–100: % of tasks that try own combs first. Default 80.
+    #[serde(default = "default_local_preference_pct")]
+    pub local_preference_pct: u8,
+    /// Whether tasks can route to pool combs (Mode 3). Default false.
+    #[serde(default)]
+    pub pool_enabled: bool,
+    /// Privacy floor for all tasks. Forager only upgrades, never demotes.
+    /// Stored as string to match TaskCreateRequest.sensitivity_required wire format.
+    #[serde(default = "default_sensitivity")]
+    pub default_sensitivity: String,
+    /// Times to retry a failed task before terminal. Default 2.
+    #[serde(default = "default_retry_count")]
+    pub retry_count: u8,
+    /// Fall back to frontier LLM if no comb is available. Default true.
+    #[serde(default = "default_frontier_fallback")]
+    pub frontier_fallback: bool,
+    /// Hard per-task timeout in seconds. Default 300.
+    #[serde(default = "default_max_execution_seconds")]
+    pub max_execution_seconds: u32,
+}
+
+fn default_local_preference_pct() -> u8 { 80 }
+fn default_sensitivity() -> String { "Private".to_string() }
+fn default_retry_count() -> u8 { 2 }
+fn default_frontier_fallback() -> bool { true }
+fn default_max_execution_seconds() -> u32 { 300 }
+
+impl Default for TenantPreferences {
+    fn default() -> Self {
+        Self {
+            local_preference_pct: default_local_preference_pct(),
+            pool_enabled: false,
+            default_sensitivity: default_sensitivity(),
+            retry_count: default_retry_count(),
+            frontier_fallback: default_frontier_fallback(),
+            max_execution_seconds: default_max_execution_seconds(),
+        }
+    }
+}
+
 /// Per-key scope. We start narrow and widen by demand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

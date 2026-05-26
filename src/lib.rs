@@ -72,6 +72,8 @@ pub struct AppState {
     pub vault: Option<std::sync::Arc<KeyVault>>,
     /// Per-tenant rate limiter. Configured via TENANT_RATE_LIMIT_RPM (default 300/min).
     pub rate_limiter: std::sync::Arc<rate_limit::RateLimiter>,
+    /// Per-tenant routing/quality preferences (sliders). In-memory; Phase 2.5 will persist to DB.
+    pub preferences: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<uuid::Uuid, tenant::TenantPreferences>>>,
 }
 
 impl AppState {
@@ -94,6 +96,7 @@ impl AppState {
             ledger_client: None,
             vault: None,
             rate_limiter: std::sync::Arc::new(rate_limit::RateLimiter::from_env()),
+            preferences: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

@@ -16,13 +16,14 @@ use uuid::Uuid;
 
 use crate::auth::AuthedTenant;
 use crate::error::{GatewayError, GatewayResult};
-use crate::tenant::{ApiKeyScope, LlmProviderView, NewLlmProvider};
+use crate::tenant::{ApiKeyScope, LlmProviderView, NewLlmProvider, TenantPreferences};
 use crate::vault;
 use crate::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/me/usage", get(usage))
+        .route("/v1/me/preferences", get(get_preferences).post(set_preferences))
         .route(
             "/v1/me/llm-providers",
             post(register_provider).get(list_providers),
@@ -79,6 +80,39 @@ async fn list_providers(
 ) -> GatewayResult<Json<Vec<LlmProviderView>>> {
     let providers = state.tenants.list_llm_providers(auth.tenant.id).await?;
     Ok(Json(providers.into_iter().map(LlmProviderView::from).collect()))
+}
+
+async fn get_preferences(
+    auth: AuthedTenant,
+    State(state): State<AppState>,
+) -> GatewayResult<Json<TenantPreferences>> {
+    let prefs = state
+        .preferences
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&auth.tenant.id)
+        .cloned()
+        .unwrap_or_default();
+    Ok(Json(prefs))
+}
+
+async fn set_preferences(
+    auth: AuthedTenant,
+    State(state): State<AppState>,
+    Json(update): Json<TenantPreferences>,
+) -> GatewayResult<Json<TenantPreferences>> {
+    // Validate ranges
+    if update.max_execution_seconds < 30 || update.max_execution_seconds > 3600 {
+        return Err(GatewayError::Invalid(
+            "max_execution_seconds must be 30–3600".to_string(),
+        ));
+    }
+    let mut map = state
+        .preferences
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.insert(auth.tenant.id, update.clone());
+    Ok(Json(update))
 }
 
 async fn delete_provider(
