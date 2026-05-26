@@ -22,6 +22,8 @@ pub enum GatewayError {
     TenantNotFound,
     #[error("budget exceeded")]
     BudgetExceeded,
+    #[error("rate limit exceeded")]
+    RateLimited { retry_after_secs: u64 },
     #[error("invalid input: {0}")]
     Invalid(String),
     #[error("upstream MCP gateway error: {0}")]
@@ -48,14 +50,26 @@ impl IntoResponse for GatewayError {
             GatewayError::MissingScope(_) => (StatusCode::FORBIDDEN, "forbidden"),
             GatewayError::TenantNotFound => (StatusCode::NOT_FOUND, "not_found"),
             GatewayError::BudgetExceeded => (StatusCode::PAYMENT_REQUIRED, "budget_exceeded"),
+            GatewayError::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             GatewayError::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
             GatewayError::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream"),
             GatewayError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
-        let body = Json(json!({
-            "error": code,
-            "message": self.to_string(),
-        }));
-        (status, body).into_response()
+        let mut response = (
+            status,
+            Json(json!({
+                "error": code,
+                "message": self.to_string(),
+            })),
+        )
+            .into_response();
+        if let GatewayError::RateLimited { retry_after_secs } = self {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_str(&retry_after_secs.to_string())
+                    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("60")),
+            );
+        }
+        response
     }
 }

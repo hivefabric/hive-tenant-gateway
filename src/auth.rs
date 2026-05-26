@@ -60,6 +60,10 @@ impl FromRequestParts<AppState> for AuthedTenant {
         if key.revoked_at.is_some() {
             return Err(GatewayError::KeyRevoked);
         }
+        if !state.rate_limiter.check(tenant.id) {
+            let retry_after_secs = state.rate_limiter.retry_after_secs(tenant.id);
+            return Err(GatewayError::RateLimited { retry_after_secs });
+        }
         Ok(AuthedTenant { tenant, key })
     }
 }

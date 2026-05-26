@@ -12,6 +12,7 @@ pub mod auth;
 pub mod budget;
 pub mod error;
 pub mod ledger;
+pub mod rate_limit;
 pub mod routes;
 pub mod tenant;
 pub mod vault;
@@ -69,6 +70,8 @@ pub struct AppState {
     /// Key vault for encrypting/decrypting stored LLM API keys.
     /// `None` = dev mode (keys stored with "raw:" prefix, with a startup warning).
     pub vault: Option<std::sync::Arc<KeyVault>>,
+    /// Per-tenant rate limiter. Configured via TENANT_RATE_LIMIT_RPM (default 300/min).
+    pub rate_limiter: std::sync::Arc<rate_limit::RateLimiter>,
 }
 
 impl AppState {
@@ -90,6 +93,7 @@ impl AppState {
             ledger_url: None,
             ledger_client: None,
             vault: None,
+            rate_limiter: std::sync::Arc::new(rate_limit::RateLimiter::from_env()),
         }
     }
 
