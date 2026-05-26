@@ -114,6 +114,37 @@ async fn tools_call(
             typed.sensitivity_required = auth.tenant.default_sensitivity.clone();
             typed.jurisdiction_required = auth.tenant.jurisdiction_required.clone();
 
+            // Session mode: inject the tenant's stored LLM provider into the task
+            // payload so queen combs can use it without needing their own API key.
+            // This lets developers run a queen with their own Claude/GPT key by just
+            // configuring their tenant provider — no comb-side [queen] block needed.
+            if typed.queen_llm.is_none() {
+                if let Ok(Some((provider, enc_key))) = state
+                    .tenants
+                    .get_default_llm_provider(auth.tenant.id)
+                    .await
+                {
+                    if let Ok(api_key) =
+                        crate::vault::decode_from_storage(state.vault.as_deref(), &enc_key)
+                    {
+                        typed.queen_llm = match provider.provider.as_str() {
+                            "anthropic" => Some(
+                                hive_sdk::frontier::LlmProviderConfig::Anthropic {
+                                    model: provider.model,
+                                    api_key,
+                                    base_url: provider.base_url,
+                                },
+                            ),
+                            _ => Some(hive_sdk::frontier::LlmProviderConfig::Openai {
+                                model: provider.model,
+                                api_key,
+                                base_url: provider.base_url,
+                            }),
+                        };
+                    }
+                }
+            }
+
             // Phase-2 billing: debit before dispatch, refund on failure.
             // Idempotency keys mirror the task_id so duplicate POSTs (CDN
             // retries, network blips) don't double-charge. The amount
