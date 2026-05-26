@@ -32,6 +32,12 @@ pub enum GatewayError {
 
 pub type GatewayResult<T> = Result<T, GatewayError>;
 
+impl From<hive_sdk::frontier::FrontierLlmError> for GatewayError {
+    fn from(e: hive_sdk::frontier::FrontierLlmError) -> Self {
+        GatewayError::Internal(format!("frontier LLM: {e}"))
+    }
+}
+
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let (status, code) = match &self {

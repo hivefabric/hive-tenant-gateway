@@ -923,10 +923,12 @@ dependencies = [
 name = "hive-sdk"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "derive_builder",
  "hive-infra",
  "regex",
+ "reqwest",
  "schemars",
  "serde",
  "serde_json",
@@ -947,6 +949,7 @@ dependencies = [
  "base64",
  "chrono",
  "hive-mcp-gateway",
+ "hive-sdk",
  "http-body-util",
  "hyper",
  "rand 0.8.6",

@@ -11,17 +11,19 @@
 pub mod auth;
 pub mod budget;
 pub mod error;
-pub mod frontier;
 pub mod ledger;
 pub mod routes;
 pub mod tenant;
 pub mod vault;
 
-pub use error::{GatewayError, GatewayResult};
-pub use frontier::{
+// Frontier LLM adapters now live in hive-sdk and are re-exported for back-compat.
+pub use hive_sdk::frontier::{
+    self as frontier, AssistantBlock, AssistantContent, ChatMessage, ChatResponse,
     DefaultFrontierLlmFactory, FrontierLlm, FrontierLlmError, FrontierLlmFactory,
-    LlmProviderConfig,
+    LlmProviderConfig, ToolCall, ToolDef,
 };
+
+pub use error::{GatewayError, GatewayResult};
 pub use tenant::{ApiKey, ApiKeyScope, InMemoryTenantStore, LlmProviderView, Tenant, TenantStore};
 pub use vault::KeyVault;
 
