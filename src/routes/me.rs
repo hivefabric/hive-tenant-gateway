@@ -1,7 +1,8 @@
-//! Tenant self-service: manage your own LLM providers.
+//! Tenant self-service: manage your own LLM providers and view credit usage.
 //!
 //! Authenticated with the tenant's own bearer token (no admin key needed).
 //!
+//! GET    /v1/me/usage                    credit balance + recent ledger events
 //! POST   /v1/me/llm-providers            register a new LLM API key
 //! GET    /v1/me/llm-providers            list registered providers (no key material)
 //! DELETE /v1/me/llm-providers/{id}       remove a provider
@@ -21,11 +22,32 @@ use crate::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/v1/me/usage", get(usage))
         .route(
             "/v1/me/llm-providers",
             post(register_provider).get(list_providers),
         )
         .route("/v1/me/llm-providers/:id", delete(delete_provider))
+}
+
+async fn usage(
+    auth: AuthedTenant,
+    State(state): State<AppState>,
+) -> GatewayResult<Json<serde_json::Value>> {
+    let Some(ref client) = state.ledger_client else {
+        return Ok(Json(serde_json::json!({
+            "tenant_id": auth.tenant.id,
+            "balance_credits": null,
+            "recent_events": [],
+            "note": "ledger not configured — set LEDGER_URL to enable credit tracking"
+        })));
+    };
+
+    let balance = client.balance(auth.tenant.id).await.unwrap_or(-1);
+    Ok(Json(serde_json::json!({
+        "tenant_id": auth.tenant.id,
+        "balance_credits": balance,
+    })))
 }
 
 async fn register_provider(
