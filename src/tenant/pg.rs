@@ -152,7 +152,12 @@ impl TenantStore for PgTenantStore {
         let _ = self.get_tenant(tenant_id).await?;
 
         let plaintext = mint_plaintext_key();
-        let key_hash = hash_key(&plaintext)?;
+        // Argon2 is CPU-intensive (~100ms). Use spawn_blocking so we don't stall the
+        // Tokio executor thread and delay other async tasks.
+        let plaintext_for_hash = plaintext.clone();
+        let key_hash = tokio::task::spawn_blocking(move || hash_key(&plaintext_for_hash))
+            .await
+            .map_err(|_| GatewayError::Internal("spawn_blocking for key hash panicked".into()))??;
         let id = Uuid::new_v4();
         let scope_strs: Vec<String> = scopes.iter().map(|s| s.as_db_str().to_string()).collect();
         let pub_id = public_id_from_token(&plaintext).map(str::to_string);

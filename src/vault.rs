@@ -13,6 +13,7 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use rand::rngs::OsRng;
 use rand::RngCore;
 
 use crate::error::{GatewayError, GatewayResult};
@@ -46,7 +47,8 @@ impl KeyVault {
     /// Encrypt `plaintext` → database-stored string.
     pub fn encrypt(&self, plaintext: &str) -> GatewayResult<String> {
         let mut nonce_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        // OsRng is a CSPRNG — required for AES-256-GCM; thread_rng() is not cryptographically secure.
+        OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = self
             .cipher
