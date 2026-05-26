@@ -6,25 +6,20 @@ The customer owns the orchestrator loop. We own the network and the SLM substrat
 
 ## Status
 
-Phase 2.2 — Postgres persistence + admin auth gate.
+**Phase 2.2 complete.** All major features implemented.
 
-- Bearer-token auth, per-tenant API keys (Argon2-hashed at rest, never plaintext).
-- Per-tenant scopes (`tools:invoke`, `orchestrate`, `read:usage`).
-- **Tenant runs the loop:** `POST /v1/mcp/tools/list`, `POST /v1/mcp/tools/call`.
-- **Gateway runs the loop:** `POST /v1/orchestrate` with the `FrontierLlm` adapter trait. Adapters today: Anthropic (Messages API) + OpenAI (Chat Completions, also covers any OpenAI-compatible provider — Together, Groq, vLLM, Ollama — via `base_url` override). Gemini / Bedrock land additively.
-- **Admin auth gate:** `/admin/v1/*` requires `x-admin-key: $HF_ADMIN_KEY`, constant-time compared. If `HF_ADMIN_KEY` is unset, the admin surface is disabled (every endpoint returns 503).
-- **Postgres-backed `TenantStore`** behind the same trait as the in-memory dev store. Selection is runtime: `DATABASE_URL` set → Postgres + migrations; unset → in-memory + dev seed tenant.
-- `tenant_id` propagated through `TaskCreateRequest` and stamped on every Honeycomb `TaskRecord`. Spoof-prevention: gateway always overrides caller-supplied `tenant_id` with the bearer's tenant.
+- ✅ Self-service onboarding: `POST /v1/signup` → API key in one call
+- ✅ LLM API key vault: AES-256-GCM encrypted; keys never in request bodies
+- ✅ LLM provider registry: register once, reference by `provider_id`
+- ✅ Tenant routing preferences (sliders): `GET/POST /v1/me/preferences`
+- ✅ Queen session mode: gateway auto-injects tenant LLM key into queen tasks
+- ✅ O(1) bearer token lookup via `public_id` index
+- ✅ Per-tenant rate limiting (300 RPM)
+- ✅ Ledger debit/refund on every run_subagent call
 
-Not yet:
-- Per-tenant LLM provider registry (today: customer sends key in each `/v1/orchestrate` body).
-- KMS for tenant-side LLM API keys.
-- Honey Ledger budget reservation/refund cycle.
-- Gemini / Bedrock adapters.
-- Bearer-token public/secret split for O(1) resolve (today: O(N) argon2 verify per resolve — viable for the first hundred tenants, tracked as Phase 2.3 perf).
+Not yet: Gemini/Bedrock adapters, preferences persisted to DB, full ledger reserve enforcement.
 
-See [`docs/02_architecture/18_tenant_gateway.md`](https://github.com/hivefabric/.github-private/blob/main/docs/private/docs/02_architecture/18_tenant_gateway.md) in the private docs.
-
+See `CLAUDE.md` for full architecture detail.
 ## Run locally
 
 ### Dev mode (in-memory store)
