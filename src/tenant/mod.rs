@@ -26,6 +26,58 @@ use crate::error::{GatewayError, GatewayResult};
 
 pub use in_memory::InMemoryTenantStore;
 
+/// A registered LLM provider belonging to a tenant.
+/// The `api_key_enc` field is NEVER returned in API responses — it is internal storage only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmProvider {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub is_default: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// View returned to callers — no key material.
+#[derive(Debug, Clone, Serialize)]
+pub struct LlmProviderView {
+    pub id: Uuid,
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub is_default: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<LlmProvider> for LlmProviderView {
+    fn from(p: LlmProvider) -> Self {
+        Self {
+            id: p.id,
+            name: p.name,
+            provider: p.provider,
+            model: p.model,
+            base_url: p.base_url,
+            is_default: p.is_default,
+            created_at: p.created_at,
+        }
+    }
+}
+
+/// Input for registering a new LLM provider.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewLlmProvider {
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    pub api_key: String,
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub is_default: bool,
+}
+
 /// Per-key scope. We start narrow and widen by demand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,6 +170,35 @@ pub trait TenantStore: Send + Sync {
     async fn resolve_api_key(&self, plaintext: &str) -> GatewayResult<(Tenant, ApiKey)>;
 
     async fn revoke_api_key(&self, key_id: Uuid) -> GatewayResult<()>;
+
+    // ── LLM provider vault ────────────────────────────────────────────────────
+
+    /// Store a new LLM provider (encrypted key).
+    async fn store_llm_provider(
+        &self,
+        tenant_id: Uuid,
+        input: NewLlmProvider,
+        api_key_enc: String,
+    ) -> GatewayResult<LlmProvider>;
+
+    /// List all LLM providers for a tenant (no key material).
+    async fn list_llm_providers(&self, tenant_id: Uuid) -> GatewayResult<Vec<LlmProvider>>;
+
+    /// Get a single provider (including encrypted key) for decryption at dispatch.
+    async fn get_llm_provider(
+        &self,
+        tenant_id: Uuid,
+        provider_id: Uuid,
+    ) -> GatewayResult<Option<(LlmProvider, String)>>;
+
+    /// Get the default provider for a tenant (including encrypted key).
+    async fn get_default_llm_provider(
+        &self,
+        tenant_id: Uuid,
+    ) -> GatewayResult<Option<(LlmProvider, String)>>;
+
+    /// Delete a LLM provider.
+    async fn delete_llm_provider(&self, tenant_id: Uuid, provider_id: Uuid) -> GatewayResult<()>;
 }
 
 /// Generate a fresh plaintext key in the `hf_<32-byte-base64url>` form.

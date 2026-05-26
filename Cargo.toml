@@ -6,6 +6,7 @@ license = "MIT"
 description = "Multi-tenant BYO-LLM HTTP gateway for HiveFabric. Each customer brings their own frontier LLM via API and dispatches work to the Comb network through MCP-equivalent tools."
 
 [dependencies]
+aes-gcm = "0.10"
 argon2 = "0.5"
 async-trait = "0.1"
 axum = { version = "0.7", features = ["macros"] }

@@ -15,13 +15,15 @@ pub mod frontier;
 pub mod ledger;
 pub mod routes;
 pub mod tenant;
+pub mod vault;
 
 pub use error::{GatewayError, GatewayResult};
 pub use frontier::{
     DefaultFrontierLlmFactory, FrontierLlm, FrontierLlmError, FrontierLlmFactory,
     LlmProviderConfig,
 };
-pub use tenant::{ApiKey, ApiKeyScope, InMemoryTenantStore, Tenant, TenantStore};
+pub use tenant::{ApiKey, ApiKeyScope, InMemoryTenantStore, LlmProviderView, Tenant, TenantStore};
+pub use vault::KeyVault;
 
 use std::sync::Arc;
 
@@ -62,6 +64,9 @@ pub struct AppState {
     /// Lazily constructed ledger client. Built on first use; `None`
     /// when `ledger_url` is unset.
     pub ledger_client: Option<ledger::LedgerClient>,
+    /// Key vault for encrypting/decrypting stored LLM API keys.
+    /// `None` = dev mode (keys stored with "raw:" prefix, with a startup warning).
+    pub vault: Option<std::sync::Arc<KeyVault>>,
 }
 
 impl AppState {
@@ -82,7 +87,13 @@ impl AppState {
             honeycomb_api_key: None,
             ledger_url: None,
             ledger_client: None,
+            vault: None,
         }
+    }
+
+    pub fn with_vault(mut self, vault: KeyVault) -> Self {
+        self.vault = Some(std::sync::Arc::new(vault));
+        self
     }
 
     /// Enable the admin surface by setting the expected `x-admin-key` value.

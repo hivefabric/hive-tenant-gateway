@@ -21,7 +21,7 @@ use hive_mcp_gateway::{tools::HttpMcpTools, HoneycombClient};
 use hive_tenant_gateway::{
     router,
     tenant::{ApiKeyScope, InMemoryTenantStore, TenantStore},
-    AppState, DefaultFrontierLlmFactory, FrontierLlmFactory,
+    AppState, DefaultFrontierLlmFactory, FrontierLlmFactory, KeyVault,
 };
 use tokio::net::TcpListener;
 
@@ -115,6 +115,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     state = state.with_honeycomb_dashboard(honeycomb_url, honeycomb_api_key);
     if let Some(url) = ledger_url {
         state = state.with_ledger_url(url);
+    }
+    if let Some(vault) = KeyVault::from_env() {
+        tracing::info!("TENANT_LLM_SECRET_KEY loaded — LLM API keys will be encrypted at rest");
+        state = state.with_vault(vault);
+    } else {
+        tracing::warn!(
+            "TENANT_LLM_SECRET_KEY not set — LLM API keys stored unencrypted (dev mode)"
+        );
     }
     let app = router(state);
 

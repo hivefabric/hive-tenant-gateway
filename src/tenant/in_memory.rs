@@ -16,7 +16,8 @@ use crate::budget::BudgetDefaults;
 use crate::error::{GatewayError, GatewayResult};
 
 use super::{
-    hash_key, mint_plaintext_key, verify_key, ApiKey, ApiKeyMint, ApiKeyScope, Tenant, TenantStore,
+    hash_key, mint_plaintext_key, verify_key, ApiKey, ApiKeyMint, ApiKeyScope, LlmProvider,
+    NewLlmProvider, Tenant, TenantStore,
 };
 
 pub struct InMemoryTenantStore {
@@ -26,6 +27,7 @@ pub struct InMemoryTenantStore {
 struct Inner {
     tenants: HashMap<Uuid, Tenant>,
     keys: HashMap<Uuid, ApiKey>,
+    llm_providers: HashMap<Uuid, (LlmProvider, String)>, // (provider, api_key_enc)
 }
 
 impl InMemoryTenantStore {
@@ -34,6 +36,7 @@ impl InMemoryTenantStore {
             inner: RwLock::new(Inner {
                 tenants: HashMap::new(),
                 keys: HashMap::new(),
+                llm_providers: HashMap::new(),
             }),
         }
     }
@@ -144,6 +147,92 @@ impl TenantStore for InMemoryTenantStore {
             .map_err(|_| GatewayError::Internal("tenant store poisoned".into()))?;
         let key = g.keys.get_mut(&key_id).ok_or(GatewayError::TenantNotFound)?;
         key.revoked_at = Some(Utc::now());
+        Ok(())
+    }
+
+    async fn store_llm_provider(
+        &self,
+        tenant_id: Uuid,
+        input: NewLlmProvider,
+        api_key_enc: String,
+    ) -> GatewayResult<LlmProvider> {
+        let mut g = self
+            .inner
+            .write()
+            .map_err(|_| GatewayError::Internal("tenant store poisoned".into()))?;
+        if input.is_default {
+            for (p, _) in g.llm_providers.values_mut() {
+                if p.tenant_id == tenant_id {
+                    p.is_default = false;
+                }
+            }
+        }
+        let id = Uuid::new_v4();
+        let provider = LlmProvider {
+            id,
+            tenant_id,
+            name: input.name,
+            provider: input.provider,
+            model: input.model,
+            base_url: input.base_url,
+            is_default: input.is_default,
+            created_at: Utc::now(),
+        };
+        g.llm_providers.insert(id, (provider.clone(), api_key_enc));
+        Ok(provider)
+    }
+
+    async fn list_llm_providers(&self, tenant_id: Uuid) -> GatewayResult<Vec<LlmProvider>> {
+        let g = self
+            .inner
+            .read()
+            .map_err(|_| GatewayError::Internal("tenant store poisoned".into()))?;
+        Ok(g.llm_providers
+            .values()
+            .filter(|(p, _)| p.tenant_id == tenant_id)
+            .map(|(p, _)| p.clone())
+            .collect())
+    }
+
+    async fn get_llm_provider(
+        &self,
+        tenant_id: Uuid,
+        provider_id: Uuid,
+    ) -> GatewayResult<Option<(LlmProvider, String)>> {
+        let g = self
+            .inner
+            .read()
+            .map_err(|_| GatewayError::Internal("tenant store poisoned".into()))?;
+        Ok(g.llm_providers.get(&provider_id).and_then(|(p, enc)| {
+            if p.tenant_id == tenant_id {
+                Some((p.clone(), enc.clone()))
+            } else {
+                None
+            }
+        }))
+    }
+
+    async fn get_default_llm_provider(
+        &self,
+        tenant_id: Uuid,
+    ) -> GatewayResult<Option<(LlmProvider, String)>> {
+        let g = self
+            .inner
+            .read()
+            .map_err(|_| GatewayError::Internal("tenant store poisoned".into()))?;
+        Ok(g.llm_providers
+            .values()
+            .find(|(p, _)| p.tenant_id == tenant_id && p.is_default)
+            .map(|(p, enc)| (p.clone(), enc.clone())))
+    }
+
+    async fn delete_llm_provider(&self, tenant_id: Uuid, provider_id: Uuid) -> GatewayResult<()> {
+        let mut g = self
+            .inner
+            .write()
+            .map_err(|_| GatewayError::Internal("tenant store poisoned".into()))?;
+        g.llm_providers
+            .retain(|id, (p, _)| !(*id == provider_id && p.tenant_id == tenant_id));
         Ok(())
     }
 }

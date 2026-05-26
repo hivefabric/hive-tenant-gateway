@@ -19,6 +19,7 @@ use crate::frontier::{
     AssistantContent, ChatMessage, ChatResponse, LlmProviderConfig, ToolCall, ToolDef,
 };
 use crate::tenant::ApiKeyScope;
+use crate::vault;
 use crate::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -34,8 +35,15 @@ struct OrchestrateRequest {
     /// Including prior `assistant` and `tool` messages is supported for
     /// resumed conversations.
     messages: Vec<ChatMessage>,
-    /// Which provider + model to use. The customer's own API key.
-    llm: LlmProviderConfig,
+    /// Use a pre-registered LLM provider (server-side key, preferred).
+    /// Register providers via `POST /admin/v1/tenants/{id}/llm-providers`.
+    #[serde(default)]
+    provider_id: Option<uuid::Uuid>,
+    /// Inline provider config (backward compat — the LLM API key travels in
+    /// the request body). Deprecated in favour of `provider_id`.
+    /// If both are set, `provider_id` takes precedence.
+    #[serde(default)]
+    llm: Option<LlmProviderConfig>,
     /// Subset of tools to expose. `None` means all available tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<String>>,
@@ -92,9 +100,73 @@ async fn orchestrate(
         .unwrap_or(DEFAULT_MAX_ITERATIONS)
         .clamp(1, HARD_MAX_ITERATIONS);
 
+    // Resolve the LLM provider config.
+    // Priority: provider_id (server-side key) > inline llm config (deprecated).
+    let llm_config: LlmProviderConfig = if let Some(pid) = req.provider_id {
+        // Look up stored provider and decrypt its key.
+        let (provider, enc_key) = state
+            .tenants
+            .get_llm_provider(auth.tenant.id, pid)
+            .await?
+            .ok_or_else(|| GatewayError::Invalid(format!("LLM provider {pid} not found")))?;
+        let api_key = vault::decode_from_storage(state.vault.as_deref(), &enc_key)?;
+        match provider.provider.as_str() {
+            "anthropic" => LlmProviderConfig::Anthropic {
+                model: provider.model,
+                api_key,
+                base_url: provider.base_url,
+            },
+            "openai" => LlmProviderConfig::Openai {
+                model: provider.model,
+                api_key,
+                base_url: provider.base_url,
+            },
+            other => {
+                return Err(GatewayError::Invalid(format!(
+                    "unknown provider type: {other}"
+                )));
+            }
+        }
+    } else if let Some(inline) = req.llm {
+        tracing::warn!(
+            tenant_id = %auth.tenant.id,
+            "LLM API key sent in request body — use provider_id for server-side key storage"
+        );
+        inline
+    } else {
+        // Try the tenant's default provider.
+        let (provider, enc_key) = state
+            .tenants
+            .get_default_llm_provider(auth.tenant.id)
+            .await?
+            .ok_or_else(|| {
+                GatewayError::Invalid(
+                    "no LLM provider: set provider_id, include 'llm' in the request, or register a default provider".to_string(),
+                )
+            })?;
+        let api_key = vault::decode_from_storage(state.vault.as_deref(), &enc_key)?;
+        match provider.provider.as_str() {
+            "anthropic" => LlmProviderConfig::Anthropic {
+                model: provider.model,
+                api_key,
+                base_url: provider.base_url,
+            },
+            "openai" => LlmProviderConfig::Openai {
+                model: provider.model,
+                api_key,
+                base_url: provider.base_url,
+            },
+            other => {
+                return Err(GatewayError::Invalid(format!(
+                    "unknown provider type: {other}"
+                )));
+            }
+        }
+    };
+
     let llm = state
         .frontier_factory
-        .build(&req.llm)
+        .build(&llm_config)
         .map_err(GatewayError::from)?;
 
     let tools = filter_tools(req.tools.as_deref());

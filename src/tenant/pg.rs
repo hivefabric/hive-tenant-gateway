@@ -17,7 +17,8 @@ use crate::budget::BudgetDefaults;
 use crate::error::{GatewayError, GatewayResult};
 
 use super::{
-    hash_key, mint_plaintext_key, verify_key, ApiKey, ApiKeyMint, ApiKeyScope, Tenant, TenantStore,
+    hash_key, mint_plaintext_key, verify_key, ApiKey, ApiKeyMint, ApiKeyScope, LlmProvider,
+    NewLlmProvider, Tenant, TenantStore,
 };
 
 #[derive(Clone)]
@@ -81,6 +82,19 @@ fn row_to_api_key(row: &sqlx::postgres::PgRow) -> ApiKey {
         created_at: row.get::<DateTime<Utc>, _>("created_at"),
         last_used_at: row.get::<Option<DateTime<Utc>>, _>("last_used_at"),
         revoked_at: row.get::<Option<DateTime<Utc>>, _>("revoked_at"),
+    }
+}
+
+fn row_to_llm_provider(row: &sqlx::postgres::PgRow) -> LlmProvider {
+    LlmProvider {
+        id: row.get("id"),
+        tenant_id: row.get("tenant_id"),
+        name: row.get("name"),
+        provider: row.get("provider"),
+        model: row.get("model"),
+        base_url: row.get("base_url"),
+        is_default: row.get("is_default"),
+        created_at: row.get("created_at"),
     }
 }
 
@@ -198,6 +212,105 @@ impl TenantStore for PgTenantStore {
             return Ok((tenant, returned));
         }
         Err(GatewayError::InvalidApiKey)
+    }
+
+    async fn store_llm_provider(
+        &self,
+        tenant_id: Uuid,
+        input: NewLlmProvider,
+        api_key_enc: String,
+    ) -> GatewayResult<LlmProvider> {
+        // If new provider is default, clear existing default first.
+        if input.is_default {
+            sqlx::query(
+                "UPDATE tenant_llm_providers SET is_default = FALSE WHERE tenant_id = $1",
+            )
+            .bind(tenant_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| pg_err("clear_default", e))?;
+        }
+        let row = sqlx::query(
+            r#"
+            INSERT INTO tenant_llm_providers
+                (tenant_id, name, provider, model, api_key_enc, base_url, is_default)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, tenant_id, name, provider, model, base_url, is_default, created_at
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(&input.name)
+        .bind(&input.provider)
+        .bind(&input.model)
+        .bind(&api_key_enc)
+        .bind(&input.base_url)
+        .bind(input.is_default)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| pg_err("store_llm_provider", e))?;
+        Ok(row_to_llm_provider(&row))
+    }
+
+    async fn list_llm_providers(&self, tenant_id: Uuid) -> GatewayResult<Vec<LlmProvider>> {
+        let rows = sqlx::query(
+            "SELECT id, tenant_id, name, provider, model, base_url, is_default, created_at \
+             FROM tenant_llm_providers WHERE tenant_id = $1 ORDER BY created_at ASC",
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| pg_err("list_llm_providers", e))?;
+        Ok(rows.iter().map(row_to_llm_provider).collect())
+    }
+
+    async fn get_llm_provider(
+        &self,
+        tenant_id: Uuid,
+        provider_id: Uuid,
+    ) -> GatewayResult<Option<(LlmProvider, String)>> {
+        let row = sqlx::query(
+            "SELECT id, tenant_id, name, provider, model, api_key_enc, base_url, is_default, created_at \
+             FROM tenant_llm_providers WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(tenant_id)
+        .bind(provider_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| pg_err("get_llm_provider", e))?;
+        Ok(row.map(|r| {
+            let enc: String = r.get("api_key_enc");
+            (row_to_llm_provider(&r), enc)
+        }))
+    }
+
+    async fn get_default_llm_provider(
+        &self,
+        tenant_id: Uuid,
+    ) -> GatewayResult<Option<(LlmProvider, String)>> {
+        let row = sqlx::query(
+            "SELECT id, tenant_id, name, provider, model, api_key_enc, base_url, is_default, created_at \
+             FROM tenant_llm_providers WHERE tenant_id = $1 AND is_default = TRUE LIMIT 1",
+        )
+        .bind(tenant_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| pg_err("get_default_llm_provider", e))?;
+        Ok(row.map(|r| {
+            let enc: String = r.get("api_key_enc");
+            (row_to_llm_provider(&r), enc)
+        }))
+    }
+
+    async fn delete_llm_provider(&self, tenant_id: Uuid, provider_id: Uuid) -> GatewayResult<()> {
+        sqlx::query(
+            "DELETE FROM tenant_llm_providers WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(tenant_id)
+        .bind(provider_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| pg_err("delete_llm_provider", e))?;
+        Ok(())
     }
 
     async fn revoke_api_key(&self, key_id: Uuid) -> GatewayResult<()> {
