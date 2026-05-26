@@ -202,10 +202,22 @@ pub trait TenantStore: Send + Sync {
 }
 
 /// Generate a fresh plaintext key in the `hf_<32-byte-base64url>` form.
+/// The first 8 chars after `hf_` are the public_id (stored in DB for O(1) lookup).
 pub fn mint_plaintext_key() -> String {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     format!("hf_{}", URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// Extract the public_id from a plaintext bearer token.
+/// Returns `None` if the token is malformed (too short or wrong prefix).
+pub(crate) fn public_id_from_token(token: &str) -> Option<&str> {
+    let after_prefix = token.strip_prefix("hf_")?;
+    if after_prefix.len() >= 8 {
+        Some(&after_prefix[..8])
+    } else {
+        None
+    }
 }
 
 pub(crate) fn hash_key(plaintext: &str) -> GatewayResult<String> {
@@ -235,6 +247,22 @@ mod tests {
         assert!(k.starts_with("hf_"));
         // 32 bytes -> 43 base64url-no-pad chars.
         assert_eq!(k.len(), 3 + 43);
+    }
+
+    #[test]
+    fn public_id_from_token_extracts_first_8_chars() {
+        let k = mint_plaintext_key(); // hf_XXXXXXXXXX...
+        let pub_id = public_id_from_token(&k).expect("should extract");
+        assert_eq!(pub_id.len(), 8);
+        assert_eq!(pub_id, &k[3..11]);
+    }
+
+    #[test]
+    fn public_id_from_token_rejects_malformed() {
+        assert!(public_id_from_token("").is_none());
+        assert!(public_id_from_token("hf_short").is_none()); // "short" = 5 chars < 8
+        assert!(public_id_from_token("hf_12345678rest").is_some()); // 8+ chars → ok
+        assert!(public_id_from_token("not-hf-prefix").is_none());
     }
 
     #[test]

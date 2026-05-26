@@ -17,8 +17,8 @@ use crate::budget::BudgetDefaults;
 use crate::error::{GatewayError, GatewayResult};
 
 use super::{
-    hash_key, mint_plaintext_key, verify_key, ApiKey, ApiKeyMint, ApiKeyScope, LlmProvider,
-    NewLlmProvider, Tenant, TenantStore,
+    hash_key, mint_plaintext_key, public_id_from_token, verify_key, ApiKey, ApiKeyMint,
+    ApiKeyScope, LlmProvider, NewLlmProvider, Tenant, TenantStore,
 };
 
 #[derive(Clone)]
@@ -155,11 +155,12 @@ impl TenantStore for PgTenantStore {
         let key_hash = hash_key(&plaintext)?;
         let id = Uuid::new_v4();
         let scope_strs: Vec<String> = scopes.iter().map(|s| s.as_db_str().to_string()).collect();
+        let pub_id = public_id_from_token(&plaintext).map(str::to_string);
 
         let row = sqlx::query(
             r#"
-            INSERT INTO tenant_api_keys (id, tenant_id, key_hash, scopes)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO tenant_api_keys (id, tenant_id, key_hash, scopes, public_id)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING id, tenant_id, key_hash, scopes, created_at, last_used_at, revoked_at
             "#,
         )
@@ -167,6 +168,7 @@ impl TenantStore for PgTenantStore {
         .bind(tenant_id)
         .bind(key_hash)
         .bind(&scope_strs)
+        .bind(pub_id)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| pg_err("mint_api_key", e))?;
@@ -181,38 +183,49 @@ impl TenantStore for PgTenantStore {
         if !plaintext.starts_with("hf_") {
             return Err(GatewayError::InvalidApiKey);
         }
+
+        // Phase 2.3: O(1) path — look up by public_id (indexed), verify only that row.
+        if let Some(pub_id) = public_id_from_token(plaintext) {
+            let maybe_row = sqlx::query(
+                r#"SELECT id, tenant_id, key_hash, scopes, created_at, last_used_at, revoked_at
+                   FROM tenant_api_keys
+                   WHERE public_id = $1 AND revoked_at IS NULL
+                   LIMIT 1"#,
+            )
+            .bind(pub_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| pg_err("resolve_api_key.by_public_id", e))?;
+
+            if let Some(row) = maybe_row {
+                let key_hash: String = row.get("key_hash");
+                if verify_key(plaintext, &key_hash) {
+                    return self.touch_and_return(row_to_api_key(&row)).await;
+                }
+                // public_id matched but hash didn't — wrong key, don't fall through
+                return Err(GatewayError::InvalidApiKey);
+            }
+        }
+
+        // Fallback: O(N) full scan for keys minted before Phase 2.3 (NULL public_id).
         let candidates = sqlx::query(
-            r#"
-            SELECT id, tenant_id, key_hash, scopes, created_at, last_used_at, revoked_at
-            FROM tenant_api_keys
-            WHERE revoked_at IS NULL
-            "#,
+            r#"SELECT id, tenant_id, key_hash, scopes, created_at, last_used_at, revoked_at
+               FROM tenant_api_keys
+               WHERE revoked_at IS NULL AND public_id IS NULL"#,
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| pg_err("resolve_api_key.candidates", e))?;
+        .map_err(|e| pg_err("resolve_api_key.legacy_scan", e))?;
 
         for row in candidates {
             let key_hash: String = row.get("key_hash");
-            if !verify_key(plaintext, &key_hash) {
-                continue;
+            if verify_key(plaintext, &key_hash) {
+                return self.touch_and_return(row_to_api_key(&row)).await;
             }
-            let key = row_to_api_key(&row);
-            let tenant = self.get_tenant(key.tenant_id).await?;
-            let now = Utc::now();
-            let _ = sqlx::query(
-                r#"UPDATE tenant_api_keys SET last_used_at = $1 WHERE id = $2"#,
-            )
-            .bind(now)
-            .bind(key.id)
-            .execute(&self.pool)
-            .await;
-            let mut returned = key;
-            returned.last_used_at = Some(now);
-            return Ok((tenant, returned));
         }
         Err(GatewayError::InvalidApiKey)
     }
+
 
     async fn store_llm_provider(
         &self,
@@ -325,6 +338,22 @@ impl TenantStore for PgTenantStore {
             return Err(GatewayError::TenantNotFound);
         }
         Ok(())
+    }
+}
+
+impl PgTenantStore {
+    /// Update `last_used_at` and return the resolved (tenant, key) pair.
+    async fn touch_and_return(&self, key: ApiKey) -> GatewayResult<(Tenant, ApiKey)> {
+        let tenant = self.get_tenant(key.tenant_id).await?;
+        let now = Utc::now();
+        let _ = sqlx::query("UPDATE tenant_api_keys SET last_used_at = $1 WHERE id = $2")
+            .bind(now)
+            .bind(key.id)
+            .execute(&self.pool)
+            .await;
+        let mut returned = key;
+        returned.last_used_at = Some(now);
+        Ok((tenant, returned))
     }
 }
 
