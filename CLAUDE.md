@@ -16,6 +16,7 @@ Multi-tenant BYO-LLM HTTP gateway for HiveFabric. Each customer brings their own
 - `src/routes/signup.rs` — `POST /v1/signup`: self-service tenant provisioning (no admin key required).
 - `src/routes/admin.rs` — `/admin/v1/*`: requires `x-admin-key: $HF_ADMIN_KEY`. Returns 503 if `HF_ADMIN_KEY` is unset.
 - `src/ledger.rs` — `LedgerClient`: calls hive-ledger for debit/refund on each `run_subagent`. No-op when `LEDGER_URL` is unset.
+- `src/routes/me.rs` — Tenant self-service endpoints: `GET /v1/me/usage` (credit balance), `GET/POST /v1/me/preferences` (routing sliders), `POST/GET/DELETE /v1/me/llm-providers` (LLM key vault CRUD).
 - `migrations/` — SQL migrations applied automatically at startup.
 
 ## How to run
@@ -52,8 +53,23 @@ cargo test -p hive-tenant-gateway
 - Frontier LLM adapters (`anthropic`, `openai`) were moved out of `src/frontier/` into `hive-sdk::frontier`. `src/lib.rs` re-exports them for back-compat. Do not re-add a local `src/frontier/` directory.
 - `tenant_id` is always overridden from the bearer's tenant — the caller cannot spoof it. Honeycomb stamps it on every `TaskRecord`.
 - `HF_ADMIN_KEY` unset → admin surface is disabled (all `/admin/v1/*` return 503). This is intentional for dev setups.
-- Rate limiter (`src/rate_limit.rs`): per-tenant, default 300 RPM. Configured via `TENANT_RATE_LIMIT_RPM`.
+- Rate limiter (`src/rate_limit.rs`): per-tenant fixed-window, default 300 RPM. Configured via `TENANT_RATE_LIMIT_RPM`.
 - Vault: generate key with `openssl rand -base64 32`. Without it, LLM API keys are stored plaintext with a `raw:` prefix and a loud startup warning — acceptable in dev, never in prod.
+- **Phase 2.3 O(1) auth**: Bearer tokens now use `public_id` (first 8 chars) for indexed lookup. New keys are O(1); old keys (pre-migration) fall back to O(N) scan until rotated.
+- **Queen session mode**: When a `run_subagent` call targets a queen capability, the gateway auto-injects the tenant's default LLM provider into the task payload (`queen_llm` field). The queen comb uses this without needing its own `[queen]` config block. Zero config for dev.
+
+### Tenant routing preferences (sliders)
+
+`GET/POST /v1/me/preferences` — configure per-tenant routing behavior:
+
+| Preference | Default | Description |
+|---|---|---|
+| `local_preference_pct` | 80 | % of tasks that try own combs first (0=always pool, 100=combs only) |
+| `pool_enabled` | false | Allow tasks to route to pool combs (Mode 3) |
+| `default_sensitivity` | `"Private"` | Privacy floor for all tasks (never demoted by Forager) |
+| `retry_count` | 2 | Times to retry failed tasks before terminal failure |
+| `frontier_fallback` | true | Fall back to frontier LLM if no eligible comb is available |
+| `max_execution_seconds` | 300 | Hard per-task timeout (30–3600) |
 
 ### Key env vars
 
@@ -70,7 +86,7 @@ cargo test -p hive-tenant-gateway
 
 ## What's not done
 
-- Gemini and Bedrock frontier adapters are not implemented (Phase 2.4).
-- Bearer-token O(1) lookup: today every resolve is an O(N) Argon2 verify — viable for the first hundred tenants, tracked as Phase 2.3 perf.
-- Per-tenant stored LLM provider registry exists in DB (`tenant_llm_providers`) but the full self-service CRUD flow is partially implemented.
-- Honey Ledger budget reservation/refund cycle is wired but the reserve-before-dispatch pattern is not enforced end-to-end.
+- Gemini and Bedrock frontier adapters (Phase 2.4).
+- TenantPreferences persistence: preferences are in-memory only (reset on restart). Phase 2.5 will add a `tenant_preferences` DB column.
+- Honey Ledger budget reservation/refund cycle is wired but reserve-before-dispatch is not enforced end-to-end.
+- WebSocket streaming in `run_subagent` (currently polls; Phase 2).
