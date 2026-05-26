@@ -134,6 +134,8 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(routes::health::router())
+        .merge(routes::signup::router())
+        .merge(routes::me::router())
         .merge(routes::mcp::router())
         .merge(routes::admin::router())
         .merge(routes::orchestrate::router())
