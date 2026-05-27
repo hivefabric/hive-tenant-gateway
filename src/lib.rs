@@ -148,7 +148,7 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::mcp::router())
         .merge(routes::admin::router())
         .merge(routes::orchestrate::router())
-        .merge(routes::ui::router())
-        .merge(routes::demo::router())
+        // Note: /ui and /v1/_demo/* have been retired.
+        // The user-facing UI now lives in hive-app (separate service on :3000).
         .with_state(state)
 }
