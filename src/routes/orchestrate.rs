@@ -329,8 +329,23 @@ async fn dispatch_tool(
             // Tenant context injected from the authenticated bearer — never
             // accepted from the LLM/caller body.
             typed.tenant_id = Some(auth.tenant.id);
-            typed.sensitivity_required = auth.tenant.default_sensitivity.clone();
+            // Apply TenantPreferences sliders (same logic as in mcp.rs run_subagent).
+            let prefs = state
+                .preferences
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&auth.tenant.id)
+                .cloned()
+                .unwrap_or_default();
+            typed.sensitivity_required = if prefs.default_sensitivity != "Private" {
+                Some(prefs.default_sensitivity.clone())
+            } else {
+                auth.tenant.default_sensitivity.clone().or(Some("Private".to_string()))
+            };
             typed.jurisdiction_required = auth.tenant.jurisdiction_required.clone();
+            if typed.timeout_seconds.is_none() {
+                typed.timeout_seconds = Some(prefs.max_execution_seconds as u64);
+            }
             let resp = state.tools.run_subagent(typed).await?;
             serde_json::to_value(resp)
                 .map_err(|e| GatewayError::Internal(format!("serialize: {e}")))

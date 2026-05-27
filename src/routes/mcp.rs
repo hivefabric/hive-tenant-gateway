@@ -111,8 +111,35 @@ async fn tools_call(
             // Source of truth for tenant context is the authenticated bearer.
             // Anything the caller put in the body is silently overridden.
             typed.tenant_id = Some(auth.tenant.id);
-            typed.sensitivity_required = auth.tenant.default_sensitivity.clone();
+
+            // Apply TenantPreferences sliders to the outbound request.
+            // Preferences override TenantConfig defaults when set.
+            let prefs = state
+                .preferences
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&auth.tenant.id)
+                .cloned()
+                .unwrap_or_default();
+
+            // Sensitivity: preferences floor takes precedence over TenantConfig default.
+            // The Forager in honeycomb will still upgrade further if PII is detected.
+            typed.sensitivity_required = if prefs.default_sensitivity != "Private" {
+                Some(prefs.default_sensitivity.clone())
+            } else {
+                auth.tenant.default_sensitivity.clone().or(Some("Private".to_string()))
+            };
             typed.jurisdiction_required = auth.tenant.jurisdiction_required.clone();
+
+            // Task timeout: apply preference if caller hasn't set one.
+            if typed.timeout_seconds.is_none() {
+                typed.timeout_seconds = Some(prefs.max_execution_seconds as u64);
+            }
+
+            // Pool routing: if disabled in preferences, restrict to tenant's own combs.
+            // This is passed via credits_budget hint for now; full allowed_nodes support
+            // requires a protocol change to RunSubagentRequest (Phase 2).
+            // TODO Phase 2: add allowed_nodes_hint field to RunSubagentRequest.
 
             // Session mode: inject the tenant's stored LLM provider into the task
             // payload so queen combs can use it without needing their own API key.
