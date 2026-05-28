@@ -31,6 +31,7 @@ pub use vault::KeyVault;
 use std::sync::Arc;
 
 use axum::Router;
+use tower_http::cors::CorsLayer;
 use hive_mcp_gateway::tools::McpTools;
 
 /// Erased pointer to the underlying MCP tools impl. Using `dyn` avoids
@@ -150,5 +151,6 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::orchestrate::router())
         // Note: /ui and /v1/_demo/* have been retired.
         // The user-facing UI now lives in hive-app (separate service on :3000).
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
