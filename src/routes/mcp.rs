@@ -124,10 +124,14 @@ async fn tools_call(
 
             // Sensitivity: preferences floor takes precedence over TenantConfig default.
             // The Forager in honeycomb will still upgrade further if PII is detected.
-            typed.sensitivity_required = if prefs.default_sensitivity != "Private" {
-                Some(prefs.default_sensitivity.clone())
-            } else {
-                auth.tenant.default_sensitivity.clone().or(Some("Private".to_string()))
+            // Sensitivity must be lowercase snake_case to match hive_sdk::Sensitivity serde.
+            typed.sensitivity_required = {
+                let raw = if prefs.default_sensitivity != "Private" {
+                    prefs.default_sensitivity.clone()
+                } else {
+                    auth.tenant.default_sensitivity.clone().unwrap_or_else(|| "private".to_string())
+                };
+                Some(raw.to_lowercase())
             };
             typed.jurisdiction_required = auth.tenant.jurisdiction_required.clone();
 

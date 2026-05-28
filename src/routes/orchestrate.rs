@@ -337,10 +337,13 @@ async fn dispatch_tool(
                 .get(&auth.tenant.id)
                 .cloned()
                 .unwrap_or_default();
-            typed.sensitivity_required = if prefs.default_sensitivity != "Private" {
-                Some(prefs.default_sensitivity.clone())
-            } else {
-                auth.tenant.default_sensitivity.clone().or(Some("Private".to_string()))
+            typed.sensitivity_required = {
+                let raw = if prefs.default_sensitivity != "Private" {
+                    prefs.default_sensitivity.clone()
+                } else {
+                    auth.tenant.default_sensitivity.clone().unwrap_or_else(|| "private".to_string())
+                };
+                Some(raw.to_lowercase())
             };
             typed.jurisdiction_required = auth.tenant.jurisdiction_required.clone();
             if typed.timeout_seconds.is_none() {
