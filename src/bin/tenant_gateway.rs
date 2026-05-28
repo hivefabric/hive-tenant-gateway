@@ -50,6 +50,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              Set it to enable tenant provisioning."
         );
     }
+    const DEV_API_KEYS: &[&str] = &["dev-hive-key", "dev", "secret", "test", "hive-key"];
+    if let Some(ref k) = honeycomb_api_key {
+        if DEV_API_KEYS.iter().any(|d| k.as_str() == *d) {
+            tracing::warn!(
+                "HONEYCOMB_API_KEY is set to a known dev default ('{}') — rotate before exposing to network",
+                k
+            );
+        }
+    }
 
     let tools = Arc::new(HttpMcpTools::new(HoneycombClient::new(
         honeycomb_url.clone(),
