@@ -4,6 +4,8 @@
 //!
 //! GET    /v1/me/usage                    credit balance + recent ledger events
 //! GET    /v1/me/combs                    list combs belonging to this tenant (proxied from honeycomb)
+//! GET    /v1/me/combs/owned              list only combs where owner_user_id == this tenant's UUID
+//! POST   /v1/me/combs/refresh            refresh cells on a specific comb
 //! POST   /v1/me/combs/enrol              generate start command for a user-owned comb
 //! POST   /v1/me/llm-providers            register a new LLM API key
 //! GET    /v1/me/llm-providers            list registered providers (no key material)
@@ -15,6 +17,7 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
+use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 use crate::auth::AuthedTenant;
@@ -27,7 +30,9 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/me/usage", get(usage))
         .route("/v1/me/combs", get(list_combs))
+        .route("/v1/me/combs/owned", get(list_owned_combs))
         .route("/v1/me/combs/enrol", post(enrol_comb))
+        .route("/v1/me/combs/refresh", post(refresh_comb))
         .route("/v1/me/preferences", get(get_preferences).post(set_preferences))
         .route(
             "/v1/me/llm-providers",
@@ -72,6 +77,111 @@ async fn list_combs(
     })?;
 
     Ok(Json(nodes))
+}
+
+/// GET /v1/me/combs/owned
+///
+/// Returns only combs where `owner_user_id` matches this tenant's UUID.
+/// Proxies GET /api/nodes from honeycomb and filters client-side.
+async fn list_owned_combs(
+    auth: AuthedTenant,
+    State(state): State<AppState>,
+) -> GatewayResult<Json<serde_json::Value>> {
+    let honeycomb_url = state.honeycomb_url.as_deref().unwrap_or("http://localhost:8080");
+    let url = format!("{honeycomb_url}/api/nodes");
+
+    let mut req = reqwest::Client::new().get(&url);
+    if let Some(api_key) = state.honeycomb_api_key.as_deref() {
+        req = req.header("x-api-key", api_key);
+    }
+
+    let resp = req.send().await.map_err(|e| {
+        GatewayError::Internal(format!("honeycomb request failed: {e}"))
+    })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(GatewayError::Internal(format!(
+            "honeycomb /api/nodes returned {status}: {body}"
+        )));
+    }
+
+    let nodes: serde_json::Value = resp.json().await.map_err(|e| {
+        GatewayError::Internal(format!("failed to parse honeycomb response: {e}"))
+    })?;
+
+    let owner_id = auth.tenant.id.to_string();
+
+    // Filter to nodes where owner_user_id matches this tenant's UUID.
+    let owned: Vec<JsonValue> = match nodes {
+        serde_json::Value::Array(arr) => arr
+            .into_iter()
+            .filter(|n| {
+                n.get("owner_user_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == owner_id)
+                    .unwrap_or(false)
+            })
+            .collect(),
+        other => {
+            // If honeycomb returns a non-array (e.g. wrapped object), return as-is.
+            return Ok(Json(other));
+        }
+    };
+
+    Ok(Json(serde_json::Value::Array(owned)))
+}
+
+/// Request body for POST /v1/me/combs/refresh
+#[derive(Debug, Deserialize)]
+struct RefreshCombRequest {
+    comb_id: String,
+}
+
+/// POST /v1/me/combs/refresh
+///
+/// Asks honeycomb to refresh cells on a specific comb via
+/// `PATCH /api/nodes/{comb_id}/refresh_cells`. If the endpoint does not exist
+/// on the upstream, returns a guidance note instead.
+async fn refresh_comb(
+    _auth: AuthedTenant,
+    State(state): State<AppState>,
+    Json(req): Json<RefreshCombRequest>,
+) -> GatewayResult<Json<serde_json::Value>> {
+    let honeycomb_url = state.honeycomb_url.as_deref().unwrap_or("http://localhost:8080");
+    let url = format!("{honeycomb_url}/api/nodes/{}/refresh_cells", req.comb_id);
+
+    let mut patch_req = reqwest::Client::new().patch(&url);
+    if let Some(api_key) = state.honeycomb_api_key.as_deref() {
+        patch_req = patch_req.header("x-api-key", api_key);
+    }
+
+    let resp = patch_req.send().await.map_err(|e| {
+        GatewayError::Internal(format!("honeycomb request failed: {e}"))
+    })?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND
+        || resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED
+    {
+        // Endpoint not implemented on this honeycomb version — return guidance.
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "note": "restart your comb to regenerate cells"
+        })));
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(GatewayError::Internal(format!(
+            "honeycomb /api/nodes/{}/refresh_cells returned {status}: {body}",
+            req.comb_id
+        )));
+    }
+
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({"ok": true}));
+    Ok(Json(body))
 }
 
 /// Request body for POST /v1/me/combs/enrol

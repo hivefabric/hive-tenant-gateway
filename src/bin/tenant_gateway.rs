@@ -23,6 +23,7 @@ use hive_tenant_gateway::{
     tenant::{ApiKeyScope, InMemoryTenantStore, TenantStore},
     AppState, DefaultFrontierLlmFactory, FrontierLlmFactory, KeyVault,
 };
+use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -70,11 +71,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut dev_seed_key: Option<String> = None;
     let mut dev_seed_tenant_id: Option<uuid::Uuid> = None;
 
+    let mut pg_pool: Option<sqlx::postgres::PgPool> = None;
+
     let tenants: Arc<dyn TenantStore> = match database_url {
         Some(url) => {
             tracing::info!("DATABASE_URL set — using Postgres TenantStore; running migrations");
             let store = hive_tenant_gateway::tenant::pg::PgTenantStore::connect(&url).await?;
             store.migrate().await?;
+            // Also keep a direct pool for tables not covered by TenantStore (e.g. chat_sessions).
+            let pool = PgPoolOptions::new()
+                .max_connections(5)
+                .connect(&url)
+                .await?;
+            pg_pool = Some(pool);
             Arc::new(store)
         }
         None => {
@@ -124,6 +133,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     state = state.with_honeycomb_dashboard(honeycomb_url, honeycomb_api_key);
     if let Some(url) = ledger_url {
         state = state.with_ledger_url(url);
+    }
+    if let Some(pool) = pg_pool {
+        state = state.with_pg_pool(pool);
     }
     if let Some(vault) = KeyVault::from_env() {
         tracing::info!("TENANT_LLM_SECRET_KEY loaded — LLM API keys will be encrypted at rest");

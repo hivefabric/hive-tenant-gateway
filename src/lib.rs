@@ -33,6 +33,7 @@ use std::sync::Arc;
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use hive_mcp_gateway::tools::McpTools;
+use sqlx::postgres::PgPool;
 
 /// Erased pointer to the underlying MCP tools impl. Using `dyn` avoids
 /// forcing handlers to be generic over a concrete `McpTools` type.
@@ -75,6 +76,9 @@ pub struct AppState {
     pub rate_limiter: std::sync::Arc<rate_limit::RateLimiter>,
     /// Per-tenant routing/quality preferences (sliders). In-memory; Phase 2.5 will persist to DB.
     pub preferences: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<uuid::Uuid, tenant::TenantPreferences>>>,
+    /// Direct Postgres pool for tables not backed by TenantStore (e.g. chat_sessions).
+    /// `None` in dev/in-memory mode — chat endpoints return 503 when unset.
+    pub pg_pool: Option<PgPool>,
 }
 
 impl AppState {
@@ -98,6 +102,7 @@ impl AppState {
             vault: None,
             rate_limiter: std::sync::Arc::new(rate_limit::RateLimiter::from_env()),
             preferences: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            pg_pool: None,
         }
     }
 
@@ -138,6 +143,11 @@ impl AppState {
         self.ledger_url = Some(url);
         self
     }
+
+    pub fn with_pg_pool(mut self, pool: PgPool) -> Self {
+        self.pg_pool = Some(pool);
+        self
+    }
 }
 
 /// Build the axum `Router` for the tenant gateway.
@@ -146,6 +156,7 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::health::router())
         .merge(routes::signup::router())
         .merge(routes::me::router())
+        .merge(routes::chats::router())
         .merge(routes::mcp::router())
         .merge(routes::admin::router())
         .merge(routes::orchestrate::router())
