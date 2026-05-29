@@ -7,12 +7,14 @@
 //! GET    /v1/me/combs/owned              list only combs where owner_user_id == this tenant's UUID
 //! POST   /v1/me/combs/refresh            refresh cells on a specific comb
 //! POST   /v1/me/combs/enrol              generate start command for a user-owned comb
+//! GET    /v1/me/models                   model catalog proxied from honeycomb (avoids exposing port 8080)
 //! POST   /v1/me/llm-providers            register a new LLM API key
 //! GET    /v1/me/llm-providers            list registered providers (no key material)
 //! DELETE /v1/me/llm-providers/{id}       remove a provider
 
 use axum::{
     extract::{Path, State},
+    response::IntoResponse,
     routing::{delete, get, post},
     Json, Router,
 };
@@ -34,6 +36,7 @@ pub fn router() -> Router<AppState> {
         .route("/v1/me/combs/owned", get(list_owned_combs))
         .route("/v1/me/combs/enrol", post(enrol_comb))
         .route("/v1/me/combs/refresh", post(refresh_comb))
+        .route("/v1/me/models", get(list_models))
         .route("/v1/me/preferences", get(get_preferences).post(set_preferences))
         .route(
             "/v1/me/llm-providers",
@@ -78,6 +81,33 @@ async fn list_combs(
     })?;
 
     Ok(Json(nodes))
+}
+
+/// GET /v1/me/models
+///
+/// Proxies the model catalog from honeycomb so clients never need to reach port 8080 directly.
+async fn list_models(
+    _auth: AuthedTenant,
+    State(state): State<AppState>,
+) -> GatewayResult<axum::response::Response> {
+    let url = format!(
+        "{}/api/models",
+        state.honeycomb_url.as_deref().unwrap_or("http://localhost:8080").trim_end_matches('/')
+    );
+    let api_key = state.honeycomb_api_key.as_deref().unwrap_or("");
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
+        .header("x-api-key", api_key)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| GatewayError::Internal(format!("models fetch: {e}")))?;
+    let body = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| GatewayError::Internal(format!("models parse: {e}")))?;
+    Ok(axum::Json(body).into_response())
 }
 
 /// GET /v1/me/combs/owned
