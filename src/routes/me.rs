@@ -323,7 +323,7 @@ async fn get_preferences(
 async fn set_preferences(
     auth: AuthedTenant,
     State(state): State<AppState>,
-    Json(update): Json<TenantPreferences>,
+    Json(mut update): Json<TenantPreferences>,
 ) -> GatewayResult<Json<TenantPreferences>> {
     // Validate ranges
     if update.max_execution_seconds < 30 || update.max_execution_seconds > 3600 {
@@ -331,12 +331,56 @@ async fn set_preferences(
             "max_execution_seconds must be 30–3600".to_string(),
         ));
     }
-    let mut map = state
-        .preferences
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    map.insert(auth.tenant.id, update.clone());
+    // Enforce premium tier minimum pool share.
+    if update.tier == "premium" && update.pool_share_pct < 50 {
+        update.pool_share_pct = 50;
+    }
+    {
+        let mut map = state
+            .preferences
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.insert(auth.tenant.id, update.clone());
+    }
+    // Fire-and-forget: ask honeycomb to refresh cells so the comb immediately
+    // reflects any queen_model or pool_share_pct changes without a restart.
+    maybe_refresh_comb_cells(&state, &update).await;
     Ok(Json(update))
+}
+
+/// Fire-and-forget helper: calls PATCH /api/nodes/{comb_id}/refresh_cells on
+/// honeycomb when `queen_comb_id` is set in preferences. Errors are silently
+/// swallowed — this is a best-effort optimisation, not a hard requirement.
+async fn maybe_refresh_comb_cells(
+    state: &AppState,
+    prefs: &TenantPreferences,
+) {
+    let comb_id = match &prefs.queen_comb_id {
+        Some(id) => id.clone(),
+        None => return,
+    };
+    let pool_share_pct = prefs.pool_share_pct;
+    let queen_model = prefs.queen_model.clone();
+    let honeycomb_url = state.honeycomb_url.as_deref().unwrap_or("http://localhost:8080");
+    let api_key = state.honeycomb_api_key.as_deref().unwrap_or("");
+    let url = format!(
+        "{}/api/nodes/{}/refresh_cells",
+        honeycomb_url.trim_end_matches('/'),
+        comb_id
+    );
+    let body = serde_json::json!({
+        "queen_model": queen_model,
+        "pool_share_pct": pool_share_pct,
+    });
+    let client = reqwest::Client::new();
+    let _ = client
+        .patch(&url)
+        .header("x-api-key", api_key)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+    // Fire-and-forget: errors are silently ignored
 }
 
 async fn delete_provider(

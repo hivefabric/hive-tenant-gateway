@@ -120,6 +120,16 @@ pub struct TenantPreferences {
     /// "local" or "cloud". Drives the chat routing hint shown to the user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queen_type: Option<String>,
+
+    // ── Tier + pool sharing ───────────────────────────────────────────────────
+    /// Tenant tier controls minimum sharing requirements.
+    /// "free" = no minimum pool share.
+    /// "premium" = minimum pool_share_pct of 50 always enforced.
+    #[serde(default = "default_tier")]
+    pub tier: String,
+    /// % of worker slots to offer to the pool. 0=none. Premium minimum=50.
+    #[serde(default)]
+    pub pool_share_pct: u8,
 }
 
 fn default_local_preference_pct() -> u8 { 80 }
@@ -127,6 +137,7 @@ fn default_sensitivity() -> String { "Private".to_string() }
 fn default_retry_count() -> u8 { 2 }
 fn default_frontier_fallback() -> bool { true }
 fn default_max_execution_seconds() -> u32 { 300 }
+fn default_tier() -> String { "free".to_string() }
 
 impl Default for TenantPreferences {
     fn default() -> Self {
@@ -142,6 +153,8 @@ impl Default for TenantPreferences {
             queen_llm_provider_id: None,
             queen_model: None,
             queen_type: None,
+            tier: default_tier(),
+            pool_share_pct: 0,
         }
     }
 }
