@@ -349,38 +349,67 @@ async fn set_preferences(
 }
 
 /// Fire-and-forget helper: calls PATCH /api/nodes/{comb_id}/refresh_cells on
-/// honeycomb when `queen_comb_id` is set in preferences. Errors are silently
-/// swallowed — this is a best-effort optimisation, not a hard requirement.
+/// Refresh cells on all online combs when preferences change.
+/// Errors are silently swallowed — best-effort optimisation.
 async fn maybe_refresh_comb_cells(
     state: &AppState,
     prefs: &TenantPreferences,
 ) {
-    let comb_id = match &prefs.queen_comb_id {
-        Some(id) => id.clone(),
-        None => return,
-    };
     let pool_share_pct = prefs.pool_share_pct;
     let queen_model = prefs.queen_model.clone();
     let honeycomb_url = state.honeycomb_url.as_deref().unwrap_or("http://localhost:8080");
     let api_key = state.honeycomb_api_key.as_deref().unwrap_or("");
-    let url = format!(
-        "{}/api/nodes/{}/refresh_cells",
-        honeycomb_url.trim_end_matches('/'),
-        comb_id
-    );
+
     let body = serde_json::json!({
         "queen_model": queen_model,
         "pool_share_pct": pool_share_pct,
     });
+
     let client = reqwest::Client::new();
-    let _ = client
-        .patch(&url)
+
+    // Collect comb IDs to refresh: queen comb (if known) + all online combs.
+    let mut comb_ids: Vec<String> = Vec::new();
+    if let Some(ref id) = prefs.queen_comb_id {
+        comb_ids.push(id.clone());
+    }
+
+    // Fetch all online combs from honeycomb and refresh them all.
+    // This ensures pool_share_pct and queen_model take effect immediately
+    // even before the user has explicitly enrolled a queen comb.
+    if let Ok(resp) = client
+        .get(format!("{}/api/nodes", honeycomb_url.trim_end_matches('/')))
         .header("x-api-key", api_key)
-        .json(&body)
         .timeout(std::time::Duration::from_secs(5))
         .send()
-        .await;
-    // Fire-and-forget: errors are silently ignored
+        .await
+    {
+        if let Ok(nodes) = resp.json::<Vec<serde_json::Value>>().await {
+            for n in nodes {
+                if let Some(id) = n.get("node_id").and_then(|v| v.as_str()) {
+                    let id = id.to_string();
+                    if !comb_ids.contains(&id) {
+                        comb_ids.push(id);
+                    }
+                }
+            }
+        }
+    }
+
+    // Refresh each comb in parallel (fire-and-forget per comb).
+    for comb_id in comb_ids {
+        let url = format!(
+            "{}/api/nodes/{}/refresh_cells",
+            honeycomb_url.trim_end_matches('/'),
+            comb_id
+        );
+        let _ = client
+            .patch(&url)
+            .header("x-api-key", api_key)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await;
+    }
 }
 
 async fn delete_provider(
