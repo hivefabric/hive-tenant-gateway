@@ -331,8 +331,9 @@ async fn set_preferences(
             "max_execution_seconds must be 30–3600".to_string(),
         ));
     }
-    // Enforce premium tier minimum pool share.
-    if update.tier == "premium" && update.pool_share_pct < 50 {
+    // Free tier: minimum 50% pool share enforced (contributes to network).
+    // Premium tier: full control, can set 0% (keeps all capacity private).
+    if update.tier != "premium" && update.pool_share_pct < 50 {
         update.pool_share_pct = 50;
     }
     {
