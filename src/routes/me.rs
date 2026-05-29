@@ -107,19 +107,10 @@ async fn enrol_comb(
     let node_id_file = format!("/tmp/hive-combs/{}.node_id", node_name);
     let config_path = format!("/tmp/hive-combs/{}.toml", node_name);
 
-    // Determine capabilities to advertise based on the requested type.
-    let (wasm_enabled, docker_enabled, capabilities_block) = match req.capabilities.to_lowercase().as_str() {
-        "docker" => (false, true, format!(
-            "[[capabilities]]\nurn = \"oasf://hive/docker/v1\"\nhandler = \"docker:default\"\ndescription = \"Docker task runner on {node_name}\"\n"
-        )),
-        "both" => (true, true, format!(
-            "[[capabilities]]\nurn = \"oasf://commons/inference/generic/v1\"\nhandler = \"llm:default\"\ndescription = \"LLM inference on {node_name}\"\n\n[[capabilities]]\nurn = \"oasf://hive/docker/v1\"\nhandler = \"docker:default\"\ndescription = \"Docker task runner on {node_name}\"\n"
-        )),
-        // default: "llm"
-        _ => (true, false, format!(
-            "[[capabilities]]\nurn = \"oasf://commons/inference/generic/v1\"\nhandler = \"llm:default\"\ndescription = \"LLM inference on {node_name}\"\n"
-        )),
-    };
+    // LLM-only capabilities.
+    let capabilities_block = format!(
+        "[[capabilities]]\nurn = \"oasf://commons/inference/generic/v1\"\nhandler = \"llm:default\"\ndescription = \"LLM inference on {node_name}\"\n"
+    );
 
     let config_toml = format!(
         r#"node_name = "{node_name}"
@@ -127,8 +118,8 @@ control_plane_url = "{honeycomb_url}"
 control_plane_api_key = "{honeycomb_api_key}"
 advertise_node_api_base_url = "{advertise_url}"
 node_id_file = "{node_id_file}"
-wasm_enabled = {wasm_enabled}
-docker_enabled = {docker_enabled}
+wasm_enabled = false
+docker_enabled = false
 max_concurrency = 4
 listen_addr = "{listen_addr}"
 
