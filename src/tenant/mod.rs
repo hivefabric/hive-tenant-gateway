@@ -107,7 +107,7 @@ pub struct TenantPreferences {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queen_comb_id: Option<String>,
     /// Capability URN on that comb used for orchestration.
-    /// e.g. "oasf://hive/queen/v1" or "oasf://hive/queen/qwen3/v1".
+    /// e.g. "oasf://hive/queen/default/v1" or "oasf://hive/queen/qwen3/v1".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queen_urn: Option<String>,
     /// LLM provider ID to inject as `queen_llm` for queen tasks.

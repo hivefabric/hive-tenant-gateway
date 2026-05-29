@@ -18,6 +18,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
+use sqlx::Row as _;
 use uuid::Uuid;
 
 use crate::auth::AuthedTenant;
@@ -310,6 +311,22 @@ async fn get_preferences(
     auth: AuthedTenant,
     State(state): State<AppState>,
 ) -> GatewayResult<Json<TenantPreferences>> {
+    // Try DB first (persistent); fall back to in-memory cache.
+    if let Some(ref pool) = state.pg_pool {
+        if let Ok(Some(row)) = sqlx::query("SELECT preferences FROM tenants WHERE id = $1")
+            .bind(auth.tenant.id)
+            .fetch_optional(pool)
+            .await
+        {
+            let v: serde_json::Value = row.get("preferences");
+            if let Ok(prefs) = serde_json::from_value::<TenantPreferences>(v) {
+                // Sync to in-memory cache
+                state.preferences.lock().unwrap_or_else(|e| e.into_inner())
+                    .insert(auth.tenant.id, prefs.clone());
+                return Ok(Json(prefs));
+            }
+        }
+    }
     let prefs = state
         .preferences
         .lock()
@@ -336,6 +353,18 @@ async fn set_preferences(
     if update.tier != "premium" && update.pool_share_pct < 50 {
         update.pool_share_pct = 50;
     }
+    // Persist to DB so preferences survive gateway restarts.
+    if let Some(ref pool) = state.pg_pool {
+        let prefs_json = serde_json::to_value(&update).unwrap_or_default();
+        let _ = sqlx::query(
+            "UPDATE tenants SET preferences = $1 WHERE id = $2"
+        )
+        .bind(prefs_json)
+        .bind(auth.tenant.id)
+        .execute(pool)
+        .await;
+    }
+    // Also update in-memory cache.
     {
         let mut map = state
             .preferences
