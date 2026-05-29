@@ -101,6 +101,25 @@ pub struct TenantPreferences {
     /// Hard per-task timeout in seconds. Default 300.
     #[serde(default = "default_max_execution_seconds")]
     pub max_execution_seconds: u32,
+
+    // ── Queen configuration ────────────────────────────────────────────────
+    /// Node ID of the comb currently serving as this tenant's queen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queen_comb_id: Option<String>,
+    /// Capability URN on that comb used for orchestration.
+    /// e.g. "oasf://hive/queen/v1" or "oasf://hive/queen/qwen3/v1".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queen_urn: Option<String>,
+    /// LLM provider ID to inject as `queen_llm` for queen tasks.
+    /// Takes precedence over the tenant's default provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queen_llm_provider_id: Option<uuid::Uuid>,
+    /// Display label — model name shown in the UI (e.g. "qwen3.6:latest").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queen_model: Option<String>,
+    /// "local" or "cloud". Drives the chat routing hint shown to the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queen_type: Option<String>,
 }
 
 fn default_local_preference_pct() -> u8 { 80 }
@@ -118,6 +137,11 @@ impl Default for TenantPreferences {
             retry_count: default_retry_count(),
             frontier_fallback: default_frontier_fallback(),
             max_execution_seconds: default_max_execution_seconds(),
+            queen_comb_id: None,
+            queen_urn: None,
+            queen_llm_provider_id: None,
+            queen_model: None,
+            queen_type: None,
         }
     }
 }

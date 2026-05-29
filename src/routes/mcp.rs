@@ -145,16 +145,26 @@ async fn tools_call(
             // requires a protocol change to RunSubagentRequest (Phase 2).
             // TODO Phase 2: add allowed_nodes_hint field to RunSubagentRequest.
 
-            // Session mode: inject the tenant's stored LLM provider into the task
-            // payload so queen combs can use it without needing their own API key.
-            // This lets developers run a queen with their own Claude/GPT key by just
-            // configuring their tenant provider — no comb-side [queen] block needed.
+            // Session mode: inject the queen's LLM provider into the task payload so
+            // queen combs can orchestrate without needing their own API key in the TOML.
+            // Priority: dedicated queen_llm_provider_id > tenant default provider.
             if typed.queen_llm.is_none() {
-                if let Ok(Some((provider, enc_key))) = state
-                    .tenants
-                    .get_default_llm_provider(auth.tenant.id)
-                    .await
-                {
+                let prefs_for_queen = state
+                    .preferences
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&auth.tenant.id)
+                    .cloned()
+                    .unwrap_or_default();
+
+                let provider_result = if let Some(qpid) = prefs_for_queen.queen_llm_provider_id {
+                    state.tenants.get_llm_provider(auth.tenant.id, qpid).await
+                } else {
+                    state.tenants.get_default_llm_provider(auth.tenant.id).await
+                        .map(|opt| opt.map(|(p, k)| (p, k)))
+                };
+
+                if let Ok(Some((provider, enc_key))) = provider_result {
                     if let Ok(api_key) =
                         crate::vault::decode_from_storage(state.vault.as_deref(), &enc_key)
                     {
