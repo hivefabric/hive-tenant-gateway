@@ -160,66 +160,125 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Background task: polls `schedules` every 30 s and fires any due entries.
 ///
-/// Phase 1: computes `next_run_at`, sets `last_run_at`, and logs the task.
-/// Phase 2: look up tenant's API key and fire via gateway's own /v1/mcp/tools/call.
+/// For each due schedule, looks up the tenant's queen LLM provider (same logic
+/// as the interactive tools_call path), builds a RunSubagentRequest, and calls
+/// state.tools.run_subagent() directly — no HTTP round-trip needed.
 async fn schedule_runner(state: hive_tenant_gateway::AppState) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        if let Some(ref pool) = state.pg_pool {
-            // Find schedules due to run (enabled + next_run_at in the past or NULL).
-            let due = sqlx::query(
-                "SELECT s.*, t.id as tid FROM schedules s
-                 JOIN tenants t ON t.id = s.tenant_id
-                 WHERE s.enabled = TRUE
-                   AND (s.next_run_at IS NULL OR s.next_run_at <= NOW())
-                 LIMIT 50",
+        let Some(ref pool) = state.pg_pool else { continue };
+
+        let due = sqlx::query(
+            "SELECT s.id, s.tenant_id, s.title, s.cron, s.task_payload
+             FROM schedules s
+             WHERE s.enabled = TRUE
+               AND (s.next_run_at IS NULL OR s.next_run_at <= NOW())
+             LIMIT 50",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        for row in due {
+            use sqlx::Row as _;
+            let sched_id: uuid::Uuid = row.get("id");
+            let tenant_id: uuid::Uuid = row.get("tenant_id");
+            let title: String = row.get("title");
+            let payload: serde_json::Value = row.get("task_payload");
+            let cron_expr: String = row.get("cron");
+
+            // Advance the schedule immediately to avoid double-fire if the run takes time.
+            let next = cron::Schedule::from_str(&cron_expr)
+                .ok()
+                .and_then(|s| s.upcoming(chrono::Utc).next())
+                .map(|t| t.with_timezone(&chrono::Utc));
+
+            let _ = sqlx::query(
+                "UPDATE schedules SET last_run_at = NOW(), next_run_at = $1, updated_at = NOW()
+                 WHERE id = $2",
             )
-            .fetch_all(pool)
-            .await
-            .unwrap_or_default();
+            .bind(next)
+            .bind(sched_id)
+            .execute(pool)
+            .await;
 
-            for row in due {
-                use sqlx::Row as _;
-                let sched_id: uuid::Uuid = row.get("id");
-                let tenant_id: uuid::Uuid = row.get("tenant_id");
-                let payload: serde_json::Value = row.get("task_payload");
-                let cron_expr: String = row.get("cron");
+            let prompt = payload
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let cap_urn = payload
+                .get("capability_urn")
+                .and_then(|v| v.as_str())
+                .map(String::from);
 
-                // Compute next_run_at from cron expression.
-                let next = cron::Schedule::from_str(&cron_expr)
-                    .ok()
-                    .and_then(|s| s.upcoming(chrono::Utc).next())
-                    .map(|t| t.with_timezone(&chrono::Utc));
+            if prompt.is_empty() {
+                tracing::warn!(schedule_id = %sched_id, "scheduled task has empty prompt; skipping");
+                continue;
+            }
 
-                // Advance the schedule: set last_run_at and next_run_at.
-                let _ = sqlx::query(
-                    "UPDATE schedules SET last_run_at = NOW(), next_run_at = $1, updated_at = NOW() WHERE id = $2",
-                )
-                .bind(next)
-                .bind(sched_id)
-                .execute(pool)
-                .await;
+            // Build the subagent request, injecting queen LLM config from tenant prefs.
+            let mut req = hive_mcp_gateway::tools::RunSubagentRequest {
+                prompt: prompt.clone(),
+                capability_urn: cap_urn,
+                tenant_id: Some(tenant_id),
+                sensitivity_required: Some("private".to_string()),
+                ..Default::default()
+            };
 
-                // Extract task parameters.
-                let prompt = payload
-                    .get("prompt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let _cap_urn = payload
-                    .get("capability_urn")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
+            // Inject queen LLM: same logic as the interactive tools_call path.
+            let prefs = state
+                .preferences
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&tenant_id)
+                .cloned()
+                .unwrap_or_default();
 
-                if !prompt.is_empty() {
-                    tracing::info!(
-                        schedule_id = %sched_id,
-                        tenant_id = %tenant_id,
-                        "firing scheduled task (Phase 1: log only)"
-                    );
-                    // Phase 2: look up tenant's API key and fire via gateway's own /v1/mcp/tools/call.
+            let provider_result = if let Some(qpid) = prefs.queen_llm_provider_id {
+                state.tenants.get_llm_provider(tenant_id, qpid).await
+            } else {
+                state
+                    .tenants
+                    .get_default_llm_provider(tenant_id)
+                    .await
+                    .map(|opt| opt.map(|(p, k)| (p, k)))
+            };
+
+            if let Ok(Some((provider, enc_key))) = provider_result {
+                if let Ok(api_key) =
+                    hive_tenant_gateway::vault::decode_from_storage(state.vault.as_deref(), &enc_key)
+                {
+                    req.queen_llm = match provider.provider.as_str() {
+                        "anthropic" => Some(hive_sdk::frontier::LlmProviderConfig::Anthropic {
+                            model: provider.model,
+                            api_key,
+                            base_url: provider.base_url,
+                        }),
+                        _ => Some(hive_sdk::frontier::LlmProviderConfig::Openai {
+                            model: provider.model,
+                            api_key,
+                            base_url: provider.base_url,
+                        }),
+                    };
                 }
             }
+
+            let tools = state.tools.clone();
+            let span = tracing::info_span!(
+                "schedule.fire",
+                schedule_id = %sched_id,
+                tenant_id = %tenant_id,
+                title = %title,
+            );
+            tokio::spawn(async move {
+                let _e = span.enter();
+                tracing::info!("firing scheduled task");
+                match tools.run_subagent(req).await {
+                    Ok(resp) => tracing::info!(status = %resp.status, "scheduled task completed"),
+                    Err(e) => tracing::error!(error = %e, "scheduled task failed"),
+                }
+            });
         }
     }
 }
