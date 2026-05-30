@@ -157,6 +157,7 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::signup::router())
         .merge(routes::me::router())
         .merge(routes::chats::router())
+        .merge(routes::schedules::router())
         .merge(routes::mcp::router())
         .merge(routes::admin::router())
         .merge(routes::orchestrate::router())

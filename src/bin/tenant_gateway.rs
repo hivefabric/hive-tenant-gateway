@@ -15,6 +15,7 @@
 //!   SEED_TENANT_NAME    name of the dev seed tenant (default "dev"), only
 //!                       used when DATABASE_URL is unset.
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use hive_mcp_gateway::{tools::HttpMcpTools, HoneycombClient};
@@ -145,10 +146,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "TENANT_LLM_SECRET_KEY not set — LLM API keys stored unencrypted (dev mode)"
         );
     }
-    let app = router(state);
+    let app = router(state.clone());
+
+    if state.pg_pool.is_some() {
+        tokio::spawn(schedule_runner(state.clone()));
+    }
 
     let listener = TcpListener::bind(&bind).await?;
     tracing::info!(%bind, "listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Background task: polls `schedules` every 30 s and fires any due entries.
+///
+/// Phase 1: computes `next_run_at`, sets `last_run_at`, and logs the task.
+/// Phase 2: look up tenant's API key and fire via gateway's own /v1/mcp/tools/call.
+async fn schedule_runner(state: hive_tenant_gateway::AppState) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        if let Some(ref pool) = state.pg_pool {
+            // Find schedules due to run (enabled + next_run_at in the past or NULL).
+            let due = sqlx::query(
+                "SELECT s.*, t.id as tid FROM schedules s
+                 JOIN tenants t ON t.id = s.tenant_id
+                 WHERE s.enabled = TRUE
+                   AND (s.next_run_at IS NULL OR s.next_run_at <= NOW())
+                 LIMIT 50",
+            )
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+
+            for row in due {
+                use sqlx::Row as _;
+                let sched_id: uuid::Uuid = row.get("id");
+                let tenant_id: uuid::Uuid = row.get("tenant_id");
+                let payload: serde_json::Value = row.get("task_payload");
+                let cron_expr: String = row.get("cron");
+
+                // Compute next_run_at from cron expression.
+                let next = cron::Schedule::from_str(&cron_expr)
+                    .ok()
+                    .and_then(|s| s.upcoming(chrono::Utc).next())
+                    .map(|t| t.with_timezone(&chrono::Utc));
+
+                // Advance the schedule: set last_run_at and next_run_at.
+                let _ = sqlx::query(
+                    "UPDATE schedules SET last_run_at = NOW(), next_run_at = $1, updated_at = NOW() WHERE id = $2",
+                )
+                .bind(next)
+                .bind(sched_id)
+                .execute(pool)
+                .await;
+
+                // Extract task parameters.
+                let prompt = payload
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let _cap_urn = payload
+                    .get("capability_urn")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                if !prompt.is_empty() {
+                    tracing::info!(
+                        schedule_id = %sched_id,
+                        tenant_id = %tenant_id,
+                        "firing scheduled task (Phase 1: log only)"
+                    );
+                    // Phase 2: look up tenant's API key and fire via gateway's own /v1/mcp/tools/call.
+                }
+            }
+        }
+    }
 }

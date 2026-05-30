@@ -50,10 +50,12 @@ pub fn router() -> Router<AppState> {
 /// Returns the list of combs belonging to this tenant. Combs register directly
 /// with honeycomb (not the gateway), so we proxy GET /api/nodes from honeycomb.
 ///
-/// TODO: filter by owner_user_id once the enrolment flow stamps owner on registration.
-///       For now we return ALL online nodes unfiltered so the demo works end-to-end.
+/// When any returned node carries an `owner_user_id` that matches this tenant's
+/// UUID, only those owned nodes are returned (tenant isolation). When no nodes
+/// are owned by this tenant (e.g. fresh dev environment with no enrolment yet),
+/// all online nodes are returned for back-compat so the demo works end-to-end.
 async fn list_combs(
-    _auth: AuthedTenant,
+    auth: AuthedTenant,
     State(state): State<AppState>,
 ) -> GatewayResult<Json<serde_json::Value>> {
     let honeycomb_url = state.honeycomb_url.as_deref().unwrap_or("http://localhost:8080");
@@ -80,7 +82,30 @@ async fn list_combs(
         GatewayError::Internal(format!("failed to parse honeycomb response: {e}"))
     })?;
 
-    Ok(Json(nodes))
+    // Filter to owned nodes when any exist; fall back to all nodes for back-compat
+    // in dev environments where combs haven't been enrolled with owner_user_id yet.
+    let owner_id = auth.tenant.id.to_string();
+    let owned: Vec<_> = match &nodes {
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter(|n| {
+                n.get("owner_user_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == owner_id)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect(),
+        _ => vec![],
+    };
+    // Return owned subset if any exist; otherwise return all (back-compat for dev).
+    let result = if owned.is_empty() {
+        nodes.clone()
+    } else {
+        serde_json::Value::Array(owned)
+    };
+
+    Ok(Json(result))
 }
 
 /// GET /v1/me/models
