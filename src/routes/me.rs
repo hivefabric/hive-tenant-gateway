@@ -317,17 +317,58 @@ async fn usage(
 ) -> GatewayResult<Json<serde_json::Value>> {
     let Some(ref client) = state.ledger_client else {
         return Ok(Json(serde_json::json!({
-            "tenant_id": auth.tenant.id,
-            "balance_credits": null,
+            "credits_remaining": 0,
+            "credits_used_today": null,
             "recent_events": [],
             "note": "ledger not configured — set LEDGER_URL to enable credit tracking"
         })));
     };
 
-    let balance = client.balance(auth.tenant.id).await.unwrap_or(-1);
+    let balance = client.balance(auth.tenant.id).await.unwrap_or(0);
+    let raw_events = client.events(auth.tenant.id, 10).await.unwrap_or_default();
+
+    // Normalise raw ledger events → UsageSummary.recent_events shape.
+    let recent_events: Vec<serde_json::Value> = raw_events
+        .iter()
+        .map(|e| {
+            let kind = e.get("kind").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let delta = e.get("delta_credits").and_then(|v| v.as_i64()).unwrap_or(0);
+            let amount = delta.unsigned_abs();
+            let at = e.get("created_at").cloned().unwrap_or(serde_json::Value::Null);
+            let description = e
+                .get("metadata")
+                .and_then(|m| m.get("capability_urn"))
+                .and_then(|u| u.as_str())
+                .map(|u| format!("{kind} · {u}"))
+                .unwrap_or_else(|| kind.to_string());
+            serde_json::json!({
+                "at": at,
+                "kind": kind,
+                "amount": amount,
+                "description": description,
+            })
+        })
+        .collect();
+
+    // Sum debits for today.
+    let today = chrono::Utc::now().date_naive();
+    let credits_used_today: u64 = raw_events
+        .iter()
+        .filter(|e| e.get("kind").and_then(|v| v.as_str()) == Some("debit"))
+        .filter(|e| {
+            e.get("created_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.date_naive() == today)
+                .unwrap_or(false)
+        })
+        .map(|e| e.get("delta_credits").and_then(|v| v.as_i64()).unwrap_or(0).unsigned_abs())
+        .sum();
+
     Ok(Json(serde_json::json!({
-        "tenant_id": auth.tenant.id,
-        "balance_credits": balance,
+        "credits_remaining": balance,
+        "credits_used_today": credits_used_today,
+        "recent_events": recent_events,
     })))
 }
 

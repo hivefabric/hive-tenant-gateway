@@ -91,6 +91,16 @@ async fn tools_call(
 ) -> GatewayResult<Json<Value>> {
     auth.require_scope(ApiKeyScope::ToolsInvoke)?;
 
+    // L2 kill-switch: reject all calls from suspended tenants immediately.
+    if state
+        .suspended_tenants
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&auth.tenant.id)
+    {
+        return Err(GatewayError::BudgetExceeded);
+    }
+
     let span = tracing::info_span!(
         "tenant_gateway.tools_call",
         hivefabric.tenant_id = %auth.tenant.id,
@@ -186,20 +196,47 @@ async fn tools_call(
                 }
             }
 
-            // Phase-2 billing: debit before dispatch, refund on failure.
-            // Idempotency keys mirror the task_id so duplicate POSTs (CDN
-            // retries, network blips) don't double-charge. The amount
-            // here is a flat 1 credit per call — the next iteration
-            // tiers it by capability_urn / token usage.
+            // Billing: debit before dispatch, refund on failure.
+            // Idempotency keys mirror the correlation id so duplicate POSTs
+            // (CDN retries, network blips) don't double-charge.
+            //
+            // Debit amount is 1 credit per call today. The next iteration
+            // tiers it by capability_urn and model_weight.
             let correlation = uuid::Uuid::new_v4().to_string();
             let urn_label = typed
                 .capability_urn
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
+
+            // Estimate token count from prompt length (~4 chars per token).
+            // model_weight = (params_B / 7.0)^0.75 per §3.1; default 1.0 for unknown models.
+            let est_tokens = {
+                let len = typed.prompt.len();
+                ((len / 4).max(1)) as u64
+            };
+            let model_weight = typed
+                .model_id
+                .as_deref()
+                .and_then(model_weight_from_id)
+                .unwrap_or(1.0);
+
             if let Some(client) = &state.ledger_client {
+                // Hard gate: check balance before debit. Return 402 if insufficient.
+                match client.balance(auth.tenant.id).await {
+                    Ok(bal) if bal <= 0 => {
+                        return Err(GatewayError::BudgetExceeded);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "ledger balance check failed; continuing");
+                    }
+                    Ok(_) => {}
+                }
+
                 let metadata = serde_json::json!({
                     "capability_urn": urn_label,
                     "model_id": typed.model_id,
+                    "est_tokens": est_tokens,
+                    "model_weight": model_weight,
                 });
                 match client
                     .debit(
@@ -220,8 +257,6 @@ async fn tools_call(
                         }
                     }
                     Err(e) => {
-                        // Ledger failures don't block dispatch in dev mode.
-                        // Production would gate the call here on balance.
                         tracing::warn!(error = %e, "ledger debit failed; continuing");
                     }
                 }
@@ -272,4 +307,31 @@ async fn tools_call(
         }
         other => Err(GatewayError::Invalid(format!("unknown tool: {other}"))),
     }
+}
+
+/// Estimate model weight from model_id string using §3.1 formula:
+/// model_weight = (params_B / 7.0)^0.75.
+///
+/// Parses known size suffixes (:0.5b, :3b, :7b, :14b, :32b, :70b, :72b).
+fn model_weight_from_id(id: &str) -> Option<f64> {
+    let lower = id.to_lowercase();
+    // Try common size tokens: 0.5b, 1b, 1.5b, 3b, 7b, 8b, 14b, 32b, 70b, 72b
+    let candidates = [
+        ("0.5b", 0.5f64),
+        ("1.5b", 1.5),
+        ("1b",   1.0),
+        ("3b",   3.0),
+        ("7b",   7.0),
+        ("8b",   8.0),
+        ("14b",  14.0),
+        ("32b",  32.0),
+        ("70b",  70.0),
+        ("72b",  72.0),
+    ];
+    for (suffix, params) in &candidates {
+        if lower.contains(suffix) {
+            return Some((params / 7.0_f64).powf(0.75));
+        }
+    }
+    None
 }

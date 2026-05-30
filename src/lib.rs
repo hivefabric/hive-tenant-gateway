@@ -79,6 +79,10 @@ pub struct AppState {
     /// Direct Postgres pool for tables not backed by TenantStore (e.g. chat_sessions).
     /// `None` in dev/in-memory mode — chat endpoints return 503 when unset.
     pub pg_pool: Option<PgPool>,
+    /// L2 kill-switch: set of tenant IDs that are currently suspended.
+    /// All tool calls from a suspended tenant return 402 BudgetExceeded.
+    /// In-memory only (reset on restart); wired to POST/DELETE /admin/v1/tenants/:id/suspend.
+    pub suspended_tenants: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<uuid::Uuid>>>,
 }
 
 impl AppState {
@@ -103,6 +107,7 @@ impl AppState {
             rate_limiter: std::sync::Arc::new(rate_limit::RateLimiter::from_env()),
             preferences: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pg_pool: None,
+            suspended_tenants: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         }
     }
 

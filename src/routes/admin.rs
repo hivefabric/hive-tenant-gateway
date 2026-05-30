@@ -26,6 +26,12 @@ pub fn router() -> Router<AppState> {
         .route("/admin/v1/tenants", post(create_tenant))
         .route("/admin/v1/tenants/:id/api-keys", post(mint_api_key))
         .route("/admin/v1/api-keys/:id", delete(revoke_api_key))
+        // L2 kill-switch: suspend / resume a tenant (in-memory, resets on restart)
+        .route(
+            "/admin/v1/tenants/:id/suspend",
+            post(suspend_tenant).delete(resume_tenant),
+        )
+        .route("/admin/v1/tenants/suspended", get(list_suspended))
         // LLM provider vault
         .route(
             "/admin/v1/tenants/:id/llm-providers",
@@ -147,4 +153,52 @@ async fn delete_llm_provider(
         .delete_llm_provider(tenant_id, provider_id)
         .await?;
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── L2 Kill-switch ────────────────────────────────────────────────────────────
+
+/// POST /admin/v1/tenants/:id/suspend — suspend a tenant (L2 kill-switch).
+/// All tool calls from this tenant will immediately return 402 until resumed.
+async fn suspend_tenant(
+    _admin: AdminAuth,
+    State(state): State<AppState>,
+    Path(tenant_id): Path<Uuid>,
+) -> GatewayResult<Json<serde_json::Value>> {
+    state
+        .suspended_tenants
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(tenant_id);
+    tracing::warn!(tenant_id = %tenant_id, "L2 kill-switch: tenant suspended");
+    Ok(Json(serde_json::json!({"ok": true, "tenant_id": tenant_id, "suspended": true})))
+}
+
+/// DELETE /admin/v1/tenants/:id/suspend — resume a suspended tenant.
+async fn resume_tenant(
+    _admin: AdminAuth,
+    State(state): State<AppState>,
+    Path(tenant_id): Path<Uuid>,
+) -> GatewayResult<Json<serde_json::Value>> {
+    state
+        .suspended_tenants
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&tenant_id);
+    tracing::info!(tenant_id = %tenant_id, "L2 kill-switch: tenant resumed");
+    Ok(Json(serde_json::json!({"ok": true, "tenant_id": tenant_id, "suspended": false})))
+}
+
+/// GET /admin/v1/tenants/suspended — list currently suspended tenants.
+async fn list_suspended(
+    _admin: AdminAuth,
+    State(state): State<AppState>,
+) -> GatewayResult<Json<serde_json::Value>> {
+    let ids: Vec<String> = state
+        .suspended_tenants
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|id| id.to_string())
+        .collect();
+    Ok(Json(serde_json::json!({"suspended_tenants": ids})))
 }

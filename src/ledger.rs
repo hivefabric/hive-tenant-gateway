@@ -54,6 +54,34 @@ impl LedgerClient {
             .await
     }
 
+    /// Fetch the most recent credit events for a tenant (up to `limit`).
+    pub async fn events(&self, tenant_id: Uuid, limit: u32) -> Result<Vec<serde_json::Value>, String> {
+        let url = format!(
+            "{}/v1/credits/{}/events?limit={}",
+            self.base_url, tenant_id, limit
+        );
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("ledger events request: {e}"))?;
+        let status = resp.status();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("ledger events body: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "ledger events rejected ({status}): {}",
+                String::from_utf8_lossy(&bytes)
+            ));
+        }
+        let v: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("ledger events parse: {e}"))?;
+        Ok(v.as_array().cloned().unwrap_or_default())
+    }
+
     pub async fn balance(&self, tenant_id: Uuid) -> Result<i64, String> {
         let url = format!("{}/v1/credits/{}/balance", self.base_url, tenant_id);
         let resp = self
